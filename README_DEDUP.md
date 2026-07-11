@@ -1,3 +1,189 @@
+# PhotoDedup Technical Documentation
+
+English | [中文](#photodedup-技术文档)
+
+`photodedup.py` is a local Tkinter-based photo de-duplication tool. It is designed to clean up an already organized photo library. It does not delete duplicates directly; instead, duplicate files are moved into the `重复图片文件/` folder under the selected library.
+
+## Usage
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 photodedup.py
+```
+
+Dependencies:
+
+- Pillow is used to read images and EXIF data, and to compute dHash and grayscale histograms.
+- `pillow-heif` registers HEIC/HEIF support. Without it, the app can still start, but HEIC/HEIF EXIF reading may be limited.
+- dHash is implemented in this project with Pillow; the third-party `imagehash` package is not required.
+
+## Target Directory Layout
+
+PhotoDedup processes each top-level subdirectory independently. It never compares files across different top-level folders.
+
+```text
+PhotoLibrary/
+├── 2023年照片集/
+├── 2024年照片集/
+├── Travel/
+├── 重复图片文件/
+│   ├── 2023年照片集/
+│   ├── 2024年照片集/
+│   └── Travel/
+└── photodedup_log.txt
+```
+
+For example, if a duplicate is found inside `2024年照片集/`, it is moved to:
+
+```text
+PhotoLibrary/重复图片文件/2024年照片集/
+```
+
+The `重复图片文件/` folder itself is excluded from scanning.
+
+## Supported Formats
+
+Scanned image extensions:
+
+- `.jpg`
+- `.jpeg`
+- `.heic`
+- `.heif`
+
+Perceptual visual de-duplication mainly targets JPEG files. HEIC/HEIF files participate in global MD5 checks and capture-time grouping.
+
+## Date Detection
+
+For each image, PhotoDedup tries to determine capture time:
+
+1. Prefer EXIF `DateTimeOriginal`, `DateTimeDigitized`, and `DateTime`.
+2. If EXIF time is unavailable, try common filename timestamps:
+   - `YYYYMMDD_HHMMSS`
+   - `YYYY-MM-DD HH-MM-SS`
+   - similar `_` and `-` separated variants
+3. `real_exif_dt` records only real EXIF time. Filename time is used only for grouping and duplicate-copy detection.
+
+## Overall Workflow
+
+1. Start the GUI and load the last library path and threshold from `~/.photodedup_config.json`.
+2. Select the photo library directory and dHash threshold.
+3. List all top-level subdirectories, excluding `重复图片文件/`.
+4. Recursively scan supported images in each top-level subdirectory.
+5. Run de-duplication stages:
+   - Global MD5 exact duplicate detection
+   - Same-second capture-time duplicate detection
+   - JPEG perceptual hash duplicate detection
+6. Move duplicate files to `重复图片文件/<TopLevelFolder>/`.
+7. Write `photodedup_log.txt`. If it already exists, write `photodedup_log_1.txt`, `photodedup_log_2.txt`, and so on.
+
+## Algorithms
+
+### 1. Global MD5 Exact Duplicates
+
+Within the same top-level subdirectory, all supported images that have not already been moved are hashed with MD5. Files with identical MD5 values are considered byte-for-byte duplicates:
+
+- Keep the largest file.
+- Move the others into the corresponding duplicate folder.
+- This stage does not depend on capture time.
+
+### 2. Same-Second Capture-Time Deduplication
+
+Images with capture time are grouped by:
+
+```text
+(capture time to second precision, extension group)
+```
+
+Extension groups:
+
+- `jpeg`: `.jpg/.jpeg`
+- `heic`: `.heic/.heif`
+
+Two checks run inside each group:
+
+1. Filename timestamp copies: if normalized filename timestamps match, they are treated as likely duplicate-copy names such as `(1)` or `_1`; the largest file is kept.
+2. JPEG visual similarity: same-second JPEGs are compared with dHash, then confirmed with grayscale histogram correlation. Similar files keep the largest version.
+
+The same-second visual check uses more permissive internal candidate thresholds:
+
+- `SAME_TIME_DHASH_THRESHOLD = 8`
+- `SAME_TIME_HIST_CONFIRM_THRESHOLD = 0.90`
+
+The UI dHash threshold is still used first for strict matching.
+
+### 3. JPEG Perceptual Hash Deduplication
+
+This stage processes only remaining `.jpg/.jpeg` files.
+
+It has two phases:
+
+1. JPEG files without real EXIF capture time are compared with each other. Similar files are clustered, and the largest file is kept.
+2. JPEG files with real EXIF capture time are compared against the remaining JPEGs without real EXIF time. If similar, the file with real EXIF time is kept.
+
+JPEG files with real EXIF capture time are not compared against each other in this stage, reducing cross-time false positives.
+
+## dHash and Histogram Confirmation
+
+dHash implementation:
+
+1. Open the image with Pillow and apply EXIF orientation correction.
+2. Convert it to grayscale.
+3. Resize it to `(hash_size + 1) x hash_size`, defaulting to `9 x 8`.
+4. Compare adjacent pixels row by row to produce a 64-bit integer fingerprint.
+5. Use Hamming distance to measure visual similarity.
+
+Histogram confirmation:
+
+- Resize the image to a `256 x 256` grayscale image.
+- Build a 64-bin grayscale histogram.
+- Compute Pearson correlation.
+- The normal confirmation threshold is `HIST_CORR_CONFIRM_THRESHOLD = 0.98`.
+
+The histogram is only a confirmation step after a dHash hit. It does not trigger duplicate detection by itself.
+
+## Performance Optimizations
+
+To avoid full pairwise comparisons in large libraries, the code includes several optimizations:
+
+- Compute dHash only when missing, and use `ThreadPoolExecutor` for larger batches.
+- Use full pairwise comparison for small sets where it is simple and reliable.
+- Use dHash chunk indexes for small thresholds.
+- Use a BK-tree candidate search for larger thresholds and larger file sets.
+- Cache file size, MD5, dHash, and histogram values in each file info dictionary.
+
+## Threshold
+
+The UI field "感知哈希相似度阈值" is the dHash Hamming-distance threshold. Its range is `0` to `3`:
+
+- `0`: strictest; only identical dHash values match.
+- `1`: default and conservative, recommended for first use.
+- `2` to `3`: more permissive; may find more similar images but increases false-positive risk.
+
+It is best to test the threshold on a copied or backup library before running it on a production photo library.
+
+## Log
+
+The log is written to the library root and includes:
+
+- Runtime
+- dHash threshold
+- Number of scanned top-level subdirectories
+- Total supported images
+- Total duplicates
+- Per-folder image counts and duplicate counts by stage
+- Duplicate file, kept file, and moved destination relationships
+- Error details
+- Elapsed time
+
+## Safety Notes
+
+- PhotoDedup moves duplicate files; the original path no longer contains them.
+- Duplicate files are not deleted and can be manually restored from `重复图片文件/`.
+- The program does not compare across top-level folders, preserving separation between years, albums, or themes.
+- The UI stop button interrupts remaining work, but completed moves are not rolled back.
+
+---
+
 # PhotoDedup 技术文档
 
 `photodedup.py` 是一个基于 Tkinter 的照片查重整理工具，用于对已经整理好的图片库执行重复文件清理。程序不会删除重复文件，而是把判定为重复的文件移动到图片库下的 `重复图片文件/` 目录。

@@ -1,3 +1,180 @@
+# PhotoTidy / VideoTidy Technical Documentation
+
+English | [中文](#phototidy--videotidy-技术文档)
+
+This project contains two local Tkinter-based desktop tools for organizing media files:
+
+- `phototidy.py`: organizes photos, videos, and other images into a year/type/month based photo library.
+- `videotidy.py`: organizes video files only, grouped by year.
+
+Both tools provide a graphical interface, progress bar, runtime log, stop button, copy/move modes, and automatic filename de-duplication by appending suffixes such as `_1`, `_2`, and so on.
+
+## Requirements
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 phototidy.py
+python3 videotidy.py
+```
+
+Notes:
+
+- Tkinter is part of the Python standard library on most Python installations.
+- `phototidy.py` requires Pillow to read image EXIF metadata.
+- HEIC/HEIF support depends on `pillow-heif`. Without it, the app can still start, but HEIC/HEIF EXIF reading may be limited.
+- `videotidy.py` only uses the Python standard library.
+
+## PhotoTidy
+
+`phototidy.py` recursively scans a source directory and archives files into a target root directory according to file type, capture time, and camera model.
+
+### Output Structure
+
+```text
+TargetRoot/
+├── YYYY年照片集/
+│   ├── 视频文件/
+│   ├── CameraModel拍摄照片/
+│   ├── 1-2月照片/
+│   ├── 3-4月照片/
+│   ├── 5-6月照片/
+│   ├── 7-8月照片/
+│   ├── 9-10月照片/
+│   ├── 11-12月照片/
+│   └── 其他图片文件/
+└── phototidy_log.txt
+```
+
+Directories are created on demand. If a category receives no files in a run, that category directory is not created.
+
+### Supported File Types
+
+Default types:
+
+- Videos: `.mov`, `.mp4`, `.avi`
+- Captured photos: `.jpg`, `.jpeg`, `.heic`, `.heif`
+- Other images: `.png`, `.bmp`, `.gif`, `.tiff`, `.tif`, `.webp`
+
+The UI field for extra image extensions can add more file types, separated by commas, for example `.avif,.svg`.
+
+### Date Detection
+
+Photo dates:
+
+1. For `.jpg/.jpeg/.heic/.heif`, PhotoTidy first reads EXIF `DateTimeOriginal`, `DateTimeDigitized`, and `DateTime`.
+2. If EXIF parsing succeeds, the file is placed under `YYYY年照片集/`, then into the corresponding two-month folder.
+3. Photos without usable EXIF capture time are placed under `其他图片文件/`, using file modification time for the year.
+
+Video dates:
+
+1. Prefer QuickTime creation time from the MOV/MP4 `moov/mvhd` atom.
+2. Fall back to filesystem birth time, `st_birthtime`.
+3. Fall back again to file modification time.
+4. Obviously invalid media dates are ignored. Valid years are limited to `1970` through the current year plus one.
+
+### Standalone Camera Folder
+
+PhotoTidy reads EXIF `Make` and `Model`, identifies standalone cameras by keyword rules, and excludes phones and tablets. If a camera model reaches `CAMERA_PHOTO_MIN_COUNT = 10` photos in the same year, those photos are archived into:
+
+```text
+YYYY年照片集/CameraModel拍摄照片/
+```
+
+Example:
+
+```text
+2024年照片集/DSC-RX100M3拍摄照片/
+```
+
+Standalone camera photos below the threshold are still grouped by month.
+
+### Workflow
+
+1. Validate that the source directory exists and is readable, and that the target directory can be created and written.
+2. Reject targets nested inside the source directory.
+3. Recursively scan all files and collect extension statistics.
+4. Pre-scan photo EXIF data to count standalone camera photos by year and model.
+5. Classify each file:
+   - Videos go to `YYYY年照片集/视频文件/`
+   - Standalone camera photos above the threshold go to `YYYY年照片集/<CameraModel>拍摄照片/`
+   - Ordinary photos with EXIF capture time go to the corresponding two-month folder
+   - Photos without capture time and other images go to `其他图片文件/`
+   - Unsupported files are skipped
+6. Copy with `shutil.copy2` or move with `shutil.move`.
+7. In move mode, remove empty source subdirectories from bottom to top.
+8. Write `phototidy_log.txt`.
+
+### Modes
+
+- Copy: keeps source files and preserves metadata with `shutil.copy2`.
+- Move: moves files out of the source directory and removes empty subdirectories. The UI asks for confirmation.
+
+### Log
+
+`phototidy_log.txt` includes:
+
+- Total input files
+- File counts by extension
+- Number of files with usable EXIF capture time
+- Number of standalone camera photos
+- Archived file counts by year
+- Success, failure, and skipped counts
+- Failure details
+- Elapsed time
+
+## VideoTidy
+
+`videotidy.py` is a lightweight video-only organizer. It does not read image EXIF metadata.
+
+### Output Structure
+
+```text
+TargetRoot/
+├── YYYY年视频文件/
+│   ├── video1.mp4
+│   └── video2.mov
+└── videotidy_log.txt
+```
+
+### Supported File Types
+
+By default, VideoTidy recognizes `.mov`, `.mp4`, and `.avi`. Extra video extensions can be added in the UI, for example `.m4v,.mts`.
+
+### Workflow
+
+1. Validate source directory, target directory, and mode.
+2. Reject targets nested inside the source directory.
+3. Recursively scan all files.
+4. For supported videos, determine archive time from:
+   - MOV/MP4 QuickTime creation time
+   - Filesystem birth time
+   - File modification time
+5. Archive videos into `YYYY年视频文件/`.
+6. Copy or move files according to the selected mode.
+7. In move mode, remove empty source subdirectories.
+8. Write `videotidy_log.txt`.
+
+### Log
+
+`videotidy_log.txt` includes:
+
+- Total input files
+- Video extensions recognized in the run
+- File counts by extension
+- Archived video counts by year
+- Success, failure, and skipped counts
+- Failure details
+- Elapsed time
+
+## Safety
+
+- The target directory cannot be inside the source directory.
+- Existing files are never overwritten; a unique target path is generated automatically.
+- Move mode requires confirmation.
+- The UI stop button interrupts remaining work, but completed file operations are not rolled back.
+
+---
+
 # PhotoTidy / VideoTidy 技术文档
 
 本项目包含两个基于 Tkinter 的本地文件整理工具：
