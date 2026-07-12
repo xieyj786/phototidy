@@ -4,13 +4,13 @@
 VideoTidy —— 视频分类整理工具
 
 功能概述：
-    从多层源目录中整理视频文件，按视频拍摄时间 / 生成时间归档到目标目录：
+    从多层源目录中整理视频文件，按视频拍摄时间 / 文件修改时间归档到目标目录：
 
     output/
     ├── YYYY年视频文件/
     │   ├── video1.mp4
     │   └── video2.mov
-    └── videotidy_log.txt
+    └── videotidy_log_YYYYMMDD_NNN.txt
 
     操作模式：
       - 拷贝（安全）：从源目录复制视频文件到目标目录，源文件保留
@@ -35,7 +35,7 @@ from tkinter import font as tkfont
 
 DEFAULT_VIDEO_EXTS = {'.mov', '.mp4', '.avi'}
 SUPPORTED_MODES = {'copy', 'move'}
-LOG_BASENAME = 'videotidy_log.txt'
+LOG_PREFIX = 'videotidy_log'
 
 
 # ============================================================
@@ -49,23 +49,6 @@ def get_file_mtime_datetime(filepath):
     except OSError:
         ts = datetime.now().timestamp()
     return datetime.fromtimestamp(ts)
-
-
-def get_file_birth_datetime(filepath):
-    """获取文件系统记录的生成时间 / 创建时间，失败返回 None。"""
-    try:
-        stat_result = os.stat(filepath)
-    except OSError:
-        return None
-
-    birth_ts = getattr(stat_result, 'st_birthtime', None)
-    if birth_ts is None:
-        return None
-
-    try:
-        return datetime.fromtimestamp(birth_ts)
-    except (OSError, OverflowError, ValueError):
-        return None
 
 
 def is_reasonable_media_datetime(dt):
@@ -185,11 +168,12 @@ def get_video_datetime(filepath):
     """
     获取视频归档时间。
 
-    优先级：视频容器创建时间 -> 文件系统生成时间 -> 文件修改时间。
+    优先级：视频容器内嵌拍摄时间 -> 文件修改时间。
+
+    不使用文件系统创建/生成时间，因为该时间可能在复制或移动后发生变化。
     """
     for dt in (
         get_quicktime_creation_datetime(filepath),
-        get_file_birth_datetime(filepath),
         get_file_mtime_datetime(filepath),
     ):
         if is_reasonable_media_datetime(dt):
@@ -299,8 +283,7 @@ def normalize_exts(text):
 # ============================================================
 
 def write_log_file(target_dir, stats):
-    """将本次运行的统计信息写入 target_dir/videotidy_log.txt。"""
-    log_path = os.path.join(target_dir, LOG_BASENAME)
+    """写入带日期和递增序号的日志文件，确保已有日志不会被覆盖。"""
     lines = []
     lines.append("=" * 50)
     lines.append("VideoTidy 运行日志")
@@ -348,10 +331,19 @@ def write_log_file(target_dir, stats):
     lines.append("")
 
     os.makedirs(target_dir, exist_ok=True)
-    with open(log_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines))
-
-    return log_path
+    date_text = datetime.now().strftime('%Y%m%d')
+    log_content = '\n'.join(lines)
+    sequence = 1
+    while True:
+        filename = f"{LOG_PREFIX}_{date_text}_{sequence:03d}.txt"
+        log_path = os.path.join(target_dir, filename)
+        try:
+            # 独占创建可避免覆盖已有日志，也能防止多个实例同时取得相同序号。
+            with open(log_path, 'x', encoding='utf-8') as f:
+                f.write(log_content)
+            return log_path
+        except FileExistsError:
+            sequence += 1
 
 
 def make_error_stats(error_msg, video_exts=None):
@@ -487,7 +479,7 @@ def organize_videos(source_dir, target_dir, mode, extra_exts,
                 log_cb(f"[清理] 删除空目录：{d}")
 
     stats['elapsed_time'] = time() - start_time
-    write_log_file(target_dir, stats)
+    stats['log_path'] = write_log_file(target_dir, stats)
     return stats
 
 
@@ -538,7 +530,7 @@ class VideoTidyApp:
         tk.Label(self.root, text="VideoTidy 视频分类整理工具", font=FONT_BOLD).pack(pady=(16, 4))
         tk.Label(
             self.root,
-            text="按视频拍摄时间或文件生成时间，将视频归档到 YYYY年视频文件 目录",
+            text="按视频拍摄时间或文件修改时间，将视频归档到 YYYY年视频文件 目录",
             font=FONT_SMALL, fg='#666666'
         ).pack(pady=(0, 20))
 
@@ -713,7 +705,8 @@ class VideoTidyApp:
                         f"成功归档视频：{stats['success_count']}\n"
                         f"失败：{stats['fail_count']}\n"
                         f"跳过（不支持的视频类型）：{stats['skip_count']}\n\n"
-                        f"详细日志已写入目标目录下的 {LOG_BASENAME}"
+                        f"详细日志已写入目标目录下的 "
+                        f"{os.path.basename(stats.get('log_path', ''))}"
                     )
 
                 elif kind == 'error':

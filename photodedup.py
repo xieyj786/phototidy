@@ -15,7 +15,7 @@ PhotoDedup —— 照片查重整理工具
         │   ├── YYYY年/                # YYYY年/ 下查出的重复文件（平铺存放）
         │   ├── 一级子目录/            # 一级子目录/ 下查出的重复文件（平铺存放）
         │   └── ...
-        └── photodedup_log.txt         # 运行日志
+        └── photodedup_log_YYYYMMDD_NNN.txt  # 运行日志
 
     每个一级子目录的查重分两步：
 
@@ -42,6 +42,7 @@ import threading
 import queue
 import hashlib
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from collections import defaultdict
@@ -73,7 +74,7 @@ EXIF_DATETIME_TAGS = (36867, 36868, 306)
 EXIF_IFD_TAG = 0x8769  # Exif SubIFD
 
 DUP_DIR_NAME = '重复图片文件'
-LOG_BASENAME = 'photodedup_log.txt'
+LOG_PREFIX = 'photodedup_log'
 
 # 配置文件：保存在用户主目录下，跨次运行记忆上次目录与阈值设置
 CONFIG_PATH = os.path.join(os.path.expanduser('~'), '.photodedup_config.json')
@@ -129,8 +130,11 @@ def parse_exif_datetime(value):
 def get_exif_datetime(filepath):
     """尝试读取图片的 EXIF 原始拍摄时间（DateTimeOriginal 等），失败返回 None"""
     try:
-        with Image.open(filepath) as img:
-            exif = img.getexif()
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=UserWarning, module=r'PIL\..*')
+            img = Image.open(filepath)
+            with img:
+                exif = img.getexif()
             if not exif:
                 return None
 
@@ -956,29 +960,14 @@ def list_top_level_dirs(library_dir):
 
 
 # ============================================================
-# 核心逻辑：日志写入（增量命名，与 PhotoTidy 风格一致）
+# 核心逻辑：日志写入
 # ============================================================
-
-def _next_log_path(library_dir):
-    """返回本次运行应写入的日志文件路径（增量命名）"""
-    base = os.path.join(library_dir, LOG_BASENAME)
-    if not os.path.exists(base):
-        return base
-    i = 1
-    while True:
-        name = LOG_BASENAME.replace('.txt', f'_{i}.txt')
-        candidate = os.path.join(library_dir, name)
-        if not os.path.exists(candidate):
-            return candidate
-        i += 1
-
 
 def write_log_file(library_dir, stats, threshold):
     """
-    将本次运行的统计信息写入 photodedup_log.txt（或递增命名），
+    将本次运行的统计信息写入带日期和递增序号的日志文件，
     包含各一级子目录下的重复文件数和重复文件对应关系。
     """
-    log_path = _next_log_path(library_dir)
     lines = []
     lines.append("=" * 50)
     lines.append("PhotoDedup 运行日志")
@@ -1030,10 +1019,18 @@ def write_log_file(library_dir, stats, threshold):
     lines.append("-" * 50)
     lines.append(f"程序运行时长：{elapsed_minutes}分{elapsed_remainder}秒")
 
-    with open(log_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines))
-
-    return log_path
+    date_text = datetime.now().strftime('%Y%m%d')
+    log_content = '\n'.join(lines)
+    sequence = 1
+    while True:
+        filename = f"{LOG_PREFIX}_{date_text}_{sequence:03d}.txt"
+        log_path = os.path.join(library_dir, filename)
+        try:
+            with open(log_path, 'x', encoding='utf-8') as f:
+                f.write(log_content)
+            return log_path
+        except FileExistsError:
+            sequence += 1
 
 
 # ============================================================
@@ -1138,7 +1135,7 @@ def run_dedup(library_dir, threshold, progress_cb=None, log_cb=None, stop_flag=N
             progress_cb(idx + 1, total_dirs, top_name)
 
     stats['elapsed_seconds'] = time.perf_counter() - start_time
-    write_log_file(library_dir, stats, threshold)
+    stats['log_path'] = write_log_file(library_dir, stats, threshold)
     return stats
 
 
@@ -1362,7 +1359,8 @@ class PhotoDedupApp:
                         f"扫描一级子目录数：{len(stats['top_level_results'])}\n"
                         f"图片文件总数：{stats['total_images']}\n"
                         f"重复文件总数：{stats['total_dup_count']}\n\n"
-                        f"详细日志已写入图片库目录下的 photodedup_log.txt（或同名递增文件）"
+                        f"详细日志已写入图片库目录下的 "
+                        f"{os.path.basename(stats.get('log_path', ''))}"
                     )
 
                 elif kind == 'error':

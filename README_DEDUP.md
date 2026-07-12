@@ -30,7 +30,7 @@ PhotoLibrary/
 │   ├── 2023年照片集/
 │   ├── 2024年照片集/
 │   └── Travel/
-└── photodedup_log.txt
+└── photodedup_log_YYYYMMDD_NNN.txt
 ```
 
 For example, if a duplicate is found inside `2024年照片集/`, it is moved to:
@@ -74,7 +74,7 @@ For each image, PhotoDedup tries to determine capture time:
    - Same-second capture-time duplicate detection
    - JPEG perceptual hash duplicate detection
 6. Move duplicate files to `重复图片文件/<TopLevelFolder>/`.
-7. Write `photodedup_log.txt`. If it already exists, write `photodedup_log_1.txt`, `photodedup_log_2.txt`, and so on.
+7. Write `photodedup_log_YYYYMMDD_NNN.txt`; runs on the same day increment the three-digit sequence.
 
 ## Algorithms
 
@@ -214,7 +214,7 @@ PhotoDedup 以图片库下的一级子目录为单位独立查重，不会跨一
 │   ├── 2023年照片集/
 │   ├── 2024年照片集/
 │   └── 旅行照片/
-└── photodedup_log.txt
+└── photodedup_log_YYYYMMDD_NNN.txt
 ```
 
 例如，在 `2024年照片集/` 中发现重复文件时，重复文件会被移动到：
@@ -258,7 +258,7 @@ PhotoDedup 以图片库下的一级子目录为单位独立查重，不会跨一
    - 同秒拍摄组内重复查重
    - JPEG 感知哈希查重
 6. 重复文件移动到 `重复图片文件/<一级子目录名>/`。
-7. 写入 `photodedup_log.txt`；如果已存在，则写入 `photodedup_log_1.txt`、`photodedup_log_2.txt` 等递增文件。
+7. 写入 `photodedup_log_YYYYMMDD_NNN.txt`；同一天多次运行时递增三位序号。
 
 ## 查重算法
 
@@ -365,3 +365,133 @@ dHash 实现方式：
 - 重复文件不会被删除，可从 `重复图片文件/` 手动恢复。
 - 程序不会跨一级子目录查重，适合保留不同相册、年份或主题目录之间的独立性。
 - 界面支持停止任务；已经移动的文件不会自动回滚。
+
+---
+
+# VideoDedup Technical Documentation
+
+English | [中文](#videodedup-技术文档)
+
+`videodedup.py` is a local Tkinter-based exact video de-duplication tool. It scans an entire video library, detects byte-for-byte duplicate files, and moves redundant copies into `重复视频文件/`. It does not use perceptual similarity and does not delete files directly.
+
+## Usage
+
+```bash
+python3 videodedup.py
+```
+
+Only the Python standard library is required. No FFmpeg, ffprobe, Pillow, or third-party hashing package is used.
+
+## Target Directory Layout
+
+Unlike PhotoDedup, VideoDedup compares supported files across all nested folders, including different year folders:
+
+```text
+VideoLibrary/
+├── 2024年视频文件/
+├── 2025年视频文件/
+├── 重复视频文件/
+│   ├── duplicate1.mp4
+│   └── duplicate2.mov
+└── videodedup_log_YYYYMMDD_NNN.txt
+```
+
+The duplicate directory is excluded from future scans. Moved duplicates are stored flat; their original directory hierarchy is not preserved. Filename conflicts are resolved by adding `_1`, `_2`, and so on.
+
+## Supported Formats
+
+The default extensions are `.mp4`, `.mov`, and `.avi`. The GUI accepts additional comma-, Chinese-comma-, or space-separated extensions such as `.mkv,.m4v,.mts`. Extensions only select candidate files; file contents are not validated as playable video.
+
+## Exact-Duplicate Algorithm
+
+1. Recursively collect supported files from the whole library, excluding `重复视频文件/`.
+2. Group files by byte size. A file whose size is unique is skipped without hashing.
+3. Read same-size candidates in 8 MiB chunks and calculate SHA-256.
+4. Group by `(file size, SHA-256)`. Only files matching both values are duplicates.
+5. Within each duplicate group, keep the file with the earliest filesystem modification time.
+6. Move every other file into the flat duplicate directory and record the relationship in the log.
+
+Capture time and modification time do not determine whether content is duplicated. Modification time is used only to choose which identical copy remains.
+
+## Progress, Stop, and Configuration
+
+- The progress bar counts only same-size hash candidates, not every scanned video.
+- Pressing Stop interrupts further hashing. Duplicate groups formed from hashes already completed are still processed and moved; completed moves are not rolled back.
+- The last library path and extension text are stored in `~/.videodedup_config.json`.
+
+## Log
+
+Logs use `videodedup_log_YYYYMMDD_NNN.txt`, for example `videodedup_log_20260712_001.txt`. They include runtime, extensions, algorithm, scanned count, duplicate count, SHA-256 values, kept/original/moved paths, errors recorded by the main workflow, elapsed time, and stopped status.
+
+## Review Findings and Safety Notes
+
+- Python syntax compilation succeeds.
+- Size plus SHA-256 equality is a conservative exact-duplicate rule with negligible practical collision risk, but it will not find transcoded, resized, clipped, or metadata-modified versions of the same video.
+- Duplicate moves are irreversible from the GUI, although files remain recoverable from `重复视频文件/`; use a backup or copied library first.
+- Move failures are shown in the live GUI and included in the final log's error list.
+- Logs are created in exclusive mode, so concurrent instances cannot overwrite the same numbered log.
+- If a modification time cannot be read, that file sorts last instead of aborting the remaining de-duplication pass.
+
+---
+
+# VideoDedup 技术文档
+
+`videodedup.py` 是一个基于 Tkinter 的精确视频查重工具。它会扫描整个视频库，通过文件内容判断完全重复文件，并把多余副本移动到 `重复视频文件/`。程序不进行感知相似查重，也不会直接删除文件。
+
+## 运行方式
+
+```bash
+python3 videodedup.py
+```
+
+程序仅使用 Python 标准库，不需要 FFmpeg、ffprobe、Pillow 或第三方哈希包。
+
+## 适用目录
+
+与 PhotoDedup 不同，VideoDedup 会跨所有下级目录比较，包括不同年份目录：
+
+```text
+视频库/
+├── 2024年视频文件/
+├── 2025年视频文件/
+├── 重复视频文件/
+│   ├── duplicate1.mp4
+│   └── duplicate2.mov
+└── videodedup_log_YYYYMMDD_NNN.txt
+```
+
+`重复视频文件/` 会被排除，不参与后续扫描。重复文件采用平铺方式存放，不保留原目录层级；同名冲突时追加 `_1`、`_2` 等序号。
+
+## 支持格式
+
+默认扩展名为 `.mp4`、`.mov`、`.avi`。界面允许用英文逗号、中文逗号或空格补充 `.mkv,.m4v,.mts` 等后缀。扩展名只用于筛选候选文件，程序不会验证文件是否能够正常播放。
+
+## 精确查重算法
+
+1. 递归扫描整个视频库，排除 `重复视频文件/`。
+2. 按字节大小分组；大小唯一的文件不计算哈希。
+3. 对相同大小的候选文件以 8 MiB 分块读取，计算 SHA-256。
+4. 按 `(文件大小, SHA-256)` 分组，两项完全一致才判定为重复。
+5. 每个重复组保留文件系统修改时间最早的一份。
+6. 其余文件移动到平铺的重复目录，并在日志中记录对应关系。
+
+拍摄时间和修改时间不参与重复内容判断；修改时间只用于决定完全相同的副本中保留哪一份。
+
+## 进度、停止与配置
+
+- 进度条统计相同大小、需要计算哈希的候选文件数，而不是扫描到的全部视频数。
+- 点击“停止”后不再计算新的哈希，但已完成哈希形成的重复组仍会继续处理和移动；已经完成的移动不会回滚。
+- 上次使用的视频库路径和扩展名保存在 `~/.videodedup_config.json`。
+
+## 运行日志
+
+日志使用 `videodedup_log_YYYYMMDD_NNN.txt`，例如 `videodedup_log_20260712_001.txt`。内容包括运行时间、处理后缀、判重方式、扫描数量、重复数量、SHA-256、保留/原始/移动目标路径、主流程记录的错误、运行时长和停止状态。
+
+## 代码检查结论与安全注意事项
+
+- Python 语法编译检查通过。
+- “大小 + SHA-256 完全一致”是保守可靠的精确查重规则，实际哈希碰撞风险可忽略；但无法识别转码、裁剪、缩放或仅元数据不同的同内容视频。
+- GUI 中的移动操作不可撤销，但文件仍保留在 `重复视频文件/`，建议先使用备份或复制的视频库测试。
+- 单个文件移动失败时会同时显示在界面实时日志中，并写入最终日志的错误列表。
+- 日志采用独占创建模式，多个实例同时运行也不会覆盖同一个编号日志。
+- 读取修改时间失败时，该文件会排在组内最后，不会中断剩余查重流程。
