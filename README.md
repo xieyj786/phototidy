@@ -4,7 +4,7 @@ English | [中文](#phototidy--videotidy-技术文档)
 
 This project contains two local Tkinter-based desktop tools for organizing media files:
 
-- `phototidy.py`: organizes photos, videos, and other images into a year/type/month based photo library.
+- `phototidy.py`: organizes photos and other image files into a year/type/month based photo library. Video files are skipped.
 - `videotidy.py`: organizes video files only, grouped by year.
 
 Both tools provide a graphical interface, progress bar, runtime log, stop button, copy/move modes, and automatic filename de-duplication by appending suffixes such as `_1`, `_2`, and so on.
@@ -33,7 +33,6 @@ Notes:
 ```text
 TargetRoot/
 ├── YYYY年照片集/
-│   ├── 视频文件/
 │   ├── CameraModel拍摄照片/
 │   ├── 1-2月照片/
 │   ├── 3-4月照片/
@@ -42,7 +41,7 @@ TargetRoot/
 │   ├── 9-10月照片/
 │   ├── 11-12月照片/
 │   └── 其他图片文件/
-└── phototidy_log.txt
+└── phototidy_log_YYYYMMDD_NNN.txt
 ```
 
 Directories are created on demand. If a category receives no files in a run, that category directory is not created.
@@ -51,7 +50,6 @@ Directories are created on demand. If a category receives no files in a run, tha
 
 Default types:
 
-- Videos: `.mov`, `.mp4`, `.avi`
 - Captured photos: `.jpg`, `.jpeg`, `.heic`, `.heif`
 - Other images: `.png`, `.bmp`, `.gif`, `.tiff`, `.tif`, `.webp`
 
@@ -64,13 +62,6 @@ Photo dates:
 1. For `.jpg/.jpeg/.heic/.heif`, PhotoTidy first reads EXIF `DateTimeOriginal`, `DateTimeDigitized`, and `DateTime`.
 2. If EXIF parsing succeeds, the file is placed under `YYYY年照片集/`, then into the corresponding two-month folder.
 3. Photos without usable EXIF capture time are placed under `其他图片文件/`, using file modification time for the year.
-
-Video dates:
-
-1. Prefer QuickTime creation time from the MOV/MP4 `moov/mvhd` atom.
-2. Fall back to filesystem birth time, `st_birthtime`.
-3. Fall back again to file modification time.
-4. Obviously invalid media dates are ignored. Valid years are limited to `1970` through the current year plus one.
 
 ### Standalone Camera Folder
 
@@ -95,14 +86,13 @@ Standalone camera photos below the threshold are still grouped by month.
 3. Recursively scan all files and collect extension statistics.
 4. Pre-scan photo EXIF data to count standalone camera photos by year and model.
 5. Classify each file:
-   - Videos go to `YYYY年照片集/视频文件/`
    - Standalone camera photos above the threshold go to `YYYY年照片集/<CameraModel>拍摄照片/`
    - Ordinary photos with EXIF capture time go to the corresponding two-month folder
    - Photos without capture time and other images go to `其他图片文件/`
    - Unsupported files are skipped
 6. Copy with `shutil.copy2` or move with `shutil.move`.
 7. In move mode, remove empty source subdirectories from bottom to top.
-8. Write `phototidy_log.txt`.
+8. Write a uniquely numbered log such as `phototidy_log_20260712_001.txt`. Runs on the same day increment the sequence without overwriting existing logs.
 
 ### Modes
 
@@ -111,7 +101,7 @@ Standalone camera photos below the threshold are still grouped by month.
 
 ### Log
 
-`phototidy_log.txt` includes:
+`phototidy_log_YYYYMMDD_NNN.txt` includes:
 
 - Total input files
 - File counts by extension
@@ -133,7 +123,7 @@ TargetRoot/
 ├── YYYY年视频文件/
 │   ├── video1.mp4
 │   └── video2.mov
-└── videotidy_log.txt
+└── videotidy_log_YYYYMMDD_NNN.txt
 ```
 
 ### Supported File Types
@@ -146,17 +136,31 @@ By default, VideoTidy recognizes `.mov`, `.mp4`, and `.avi`. Extra video extensi
 2. Reject targets nested inside the source directory.
 3. Recursively scan all files.
 4. For supported videos, determine archive time from:
-   - MOV/MP4 QuickTime creation time
-   - Filesystem birth time
-   - File modification time
+   - The capture time embedded in the MOV/MP4 container
+   - File modification time when embedded capture time is unavailable
 5. Archive videos into `YYYY年视频文件/`.
 6. Copy or move files according to the selected mode.
 7. In move mode, remove empty source subdirectories.
-8. Write `videotidy_log.txt`.
+8. Write a uniquely numbered log such as `videotidy_log_20260712_001.txt`. Runs on the same day increment the three-digit sequence and never overwrite an existing log.
+
+Filesystem creation/birth time is deliberately not used because copying or moving a file may change it and cause the video to be archived under the wrong year.
+
+## Recent Responsibility and Date Changes
+
+- `phototidy.py` is now image-only. Video extensions, QuickTime parsing, video classification, and the `视频文件` output directory were removed. Video files are treated as unsupported and skipped; use `videotidy.py` for them.
+- `videotidy.py` now classifies videos by embedded capture time, falling back only to file modification time. Filesystem creation/generation time is no longer a classification source.
+
+## Numbered Log Files
+
+The tools create date-stamped, three-digit sequential log files and never overwrite an existing log. Runs on the same day use `_001`, `_002`, `_003`, and so on:
+
+- PhotoTidy: `phototidy_log_YYYYMMDD_NNN.txt`
+- PhotoDedup: `photodedup_log_YYYYMMDD_NNN.txt`
+- VideoTidy: `videotidy_log_YYYYMMDD_NNN.txt`
 
 ### Log
 
-`videotidy_log.txt` includes:
+`videotidy_log_YYYYMMDD_NNN.txt` includes:
 
 - Total input files
 - Video extensions recognized in the run
@@ -179,7 +183,7 @@ By default, VideoTidy recognizes `.mov`, `.mp4`, and `.avi`. Extra video extensi
 
 本项目包含两个基于 Tkinter 的本地文件整理工具：
 
-- `phototidy.py`：整理照片、视频和其他图片，输出到按年份、类型、月份划分的照片库。
+- `phototidy.py`：只整理照片和其他图片，输出到按年份、类型、月份划分的照片库；视频文件会被跳过。
 - `videotidy.py`：只整理视频文件，输出到按年份划分的视频目录。
 
 两个工具都支持图形界面、进度条、运行日志、停止任务、拷贝/移动两种模式，并会在同名文件冲突时自动追加 `_1`、`_2` 等后缀避免覆盖。
@@ -208,7 +212,6 @@ python3 videotidy.py
 ```text
 目标根目录/
 ├── YYYY年照片集/
-│   ├── 视频文件/
 │   ├── 相机型号拍摄照片/
 │   ├── 1-2月照片/
 │   ├── 3-4月照片/
@@ -217,7 +220,7 @@ python3 videotidy.py
 │   ├── 9-10月照片/
 │   ├── 11-12月照片/
 │   └── 其他图片文件/
-└── phototidy_log.txt
+└── phototidy_log_YYYYMMDD_NNN.txt
 ```
 
 目录按需创建。某类文件本次没有成功归档时，不会创建对应子目录。
@@ -226,7 +229,6 @@ python3 videotidy.py
 
 默认识别：
 
-- 视频：`.mov`、`.mp4`、`.avi`
 - 拍摄照片：`.jpg`、`.jpeg`、`.heic`、`.heif`
 - 其他图片：`.png`、`.bmp`、`.gif`、`.tiff`、`.tif`、`.webp`
 
@@ -239,13 +241,6 @@ python3 videotidy.py
 1. 对 `.jpg/.jpeg/.heic/.heif`，优先读取 EXIF 中的 `DateTimeOriginal`、`DateTimeDigitized`、`DateTime`。
 2. 解析成功后按 EXIF 年份进入 `YYYY年照片集/`，再按月份进入双月目录。
 3. 没有可用 EXIF 拍摄时间的照片进入 `其他图片文件/`，年份使用文件修改时间。
-
-视频时间：
-
-1. 优先读取 MOV/MP4 容器 `moov/mvhd` atom 中的 QuickTime creation time。
-2. 若容器时间不可用，使用文件系统创建时间 `st_birthtime`。
-3. 若仍不可用，使用文件修改时间。
-4. 明显异常的时间会被过滤，只接受 `1970` 到当前年份后一年的范围。
 
 ### 独立相机照片目录
 
@@ -270,14 +265,13 @@ YYYY年照片集/相机型号拍摄照片/
 3. 递归扫描源目录下全部文件，统计总数和后缀数量。
 4. 预扫描照片 EXIF，统计每年每个独立相机型号的照片数量。
 5. 逐个文件分类：
-   - 视频进入 `YYYY年照片集/视频文件/`
    - 达到阈值的独立相机照片进入 `YYYY年照片集/<相机型号>拍摄照片/`
    - 有 EXIF 拍摄时间的普通照片进入对应双月目录
    - 无拍摄时间的照片和其他图片进入 `其他图片文件/`
    - 非支持类型计为跳过
 6. 根据模式执行 `copy2` 或 `move`。
 7. 移动模式结束后，自底向上删除源目录中因移动产生的空子目录。
-8. 写入 `phototidy_log.txt`。
+8. 写入唯一编号的日志，例如 `phototidy_log_20260712_001.txt`。同一天多次运行时序号依次递增，不覆盖已有日志。
 
 ### 操作模式
 
@@ -286,7 +280,7 @@ YYYY年照片集/相机型号拍摄照片/
 
 ### 运行日志
 
-`phototidy_log.txt` 包含：
+`phototidy_log_YYYYMMDD_NNN.txt` 包含：
 
 - 输入文件总数
 - 各后缀文件数
@@ -308,7 +302,7 @@ YYYY年照片集/相机型号拍摄照片/
 ├── YYYY年视频文件/
 │   ├── video1.mp4
 │   └── video2.mov
-└── videotidy_log.txt
+└── videotidy_log_YYYYMMDD_NNN.txt
 ```
 
 ### 支持的文件类型
@@ -321,17 +315,31 @@ YYYY年照片集/相机型号拍摄照片/
 2. 拒绝目标目录位于源目录内部。
 3. 递归扫描源目录下全部文件。
 4. 对支持的视频文件读取归档时间：
-   - MOV/MP4 QuickTime creation time
-   - 文件系统创建时间
-   - 文件修改时间
+   - MOV/MP4 容器内嵌的拍摄时间
+   - 无法取得内嵌拍摄时间时，使用文件修改时间
 5. 将视频归档到 `YYYY年视频文件/`。
 6. 根据模式执行拷贝或移动。
 7. 移动模式下删除源目录中的空子目录。
-8. 写入 `videotidy_log.txt`。
+8. 写入唯一编号的日志，例如 `videotidy_log_20260712_001.txt`。同一天多次运行时三位序号依次递增，不会覆盖已有日志。
+
+程序明确不再使用文件系统创建/生成时间，因为复制或移动文件可能改变该时间，导致视频被归档到错误年份。
+
+## 近期职责与时间规则调整
+
+- `phototidy.py` 现已专注处理图片。视频扩展名、QuickTime 解析、视频分类以及 `视频文件` 输出目录相关代码均已删除。视频文件会作为不支持类型跳过，请使用 `videotidy.py` 整理视频。
+- `videotidy.py` 现在优先按视频容器内嵌的拍摄时间分类，读取失败时仅回退到文件修改时间，不再把文件系统创建/生成时间作为分类依据。
+
+## 带序号的日志文件
+
+各工具均使用包含日期和三位递增序号的日志文件名，不会覆盖已有日志。同一天多次运行依次使用 `_001`、`_002`、`_003`：
+
+- PhotoTidy：`phototidy_log_YYYYMMDD_NNN.txt`
+- PhotoDedup：`photodedup_log_YYYYMMDD_NNN.txt`
+- VideoTidy：`videotidy_log_YYYYMMDD_NNN.txt`
 
 ### 运行日志
 
-`videotidy_log.txt` 包含：
+`videotidy_log_YYYYMMDD_NNN.txt` 包含：
 
 - 输入文件总数
 - 本次识别为视频的后缀集合

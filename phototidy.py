@@ -4,12 +4,11 @@
 PhotoTidy —— 照片分类整理工具
 
 功能概述：
-    从杂乱的源目录中整理出真实拍摄的照片 / 视频，以及截图、转发图片等其他图片，
+    从杂乱的源目录中整理出真实拍摄的照片，以及截图、转发图片等其他图片，
     按拍摄时间（或修改时间）与文件类型，分类归档到目标目录：
 
     photo-tidy/
     ├── YYYY年照片集/
-    │   ├── 视频文件/          # .mov / .mp4 等视频文件
     │   ├── 相机型号拍摄照片/   # 根据 EXIF Model 生成，如 DSC-RX100M3拍摄照片
     │   ├── 1-2月照片/         # 拍摄时间在1、2月的照片
     │   ├── 3-4月照片/
@@ -18,7 +17,7 @@ PhotoTidy —— 照片分类整理工具
     │   ├── 9-10月照片/
     │   ├── 11-12月照片/
     │   └── 其他图片文件/       # 截图、转发图片、无拍摄时间的图片等
-    └── phototidy_log.txt      # 运行日志
+    └── phototidy_log_YYYYMMDD_NNN.txt  # 运行日志
 
     操作模式：
       - 拷贝（安全）：从源目录复制文件到目标目录，源文件保留
@@ -61,7 +60,6 @@ except ImportError:
 # 常量定义
 # ============================================================
 
-VIDEO_EXTS = {'.mov', '.mp4', '.avi'}
 PHOTO_EXTS = {'.jpg', '.jpeg', '.heic', '.heif'}
 DEFAULT_OTHER_IMAGE_EXTS = {'.png', '.bmp', '.gif', '.tiff', '.tif', '.webp'}
 CAMERA_PHOTO_MIN_COUNT = 10
@@ -98,6 +96,7 @@ CAMERA_MODEL_PREFIXES = (
     'X100', 'DMC-', 'DC-', 'LUMIX', 'PENTAX ', 'GR ', 'GOPRO',
 )
 SUPPORTED_MODES = {'copy', 'move'}
+LOG_PREFIX = 'phototidy_log'
 
 
 def is_pillow_available():
@@ -140,10 +139,10 @@ def get_exif_datetime(filepath):
     try:
         # 抑制 PIL 对截断/损坏图片文件的警告（如 "Truncated File Read"）
         with warnings.catch_warnings():
-            warnings.filterwarnings('ignore', category=UserWarning, module='PIL')
+            warnings.filterwarnings('ignore', category=UserWarning, module=r'PIL\..*')
             img = Image.open(filepath)
-        with img:
-            exif = img.getexif()
+            with img:
+                exif = img.getexif()
 
             if not exif:
                 return None
@@ -179,15 +178,15 @@ def get_exif_camera_make_model(filepath):
         return '', ''
     try:
         with warnings.catch_warnings():
-            warnings.filterwarnings('ignore', category=UserWarning, module='PIL')
+            warnings.filterwarnings('ignore', category=UserWarning, module=r'PIL\..*')
             img = Image.open(filepath)
-        with img:
-            exif = img.getexif()
-            if not exif:
-                return '', ''
-            make = str(exif.get(EXIF_MAKE_TAG, '')).strip()
-            model = str(exif.get(EXIF_MODEL_TAG, '')).strip()
-            return make, model
+            with img:
+                exif = img.getexif()
+                if not exif:
+                    return '', ''
+                make = str(exif.get(EXIF_MAKE_TAG, '')).strip()
+                model = str(exif.get(EXIF_MODEL_TAG, '')).strip()
+                return make, model
     except (IOError, OSError, ValueError):
         return '', ''
 
@@ -228,157 +227,6 @@ def get_file_mtime_datetime(filepath):
     return datetime.fromtimestamp(ts)
 
 
-def get_file_birth_datetime(filepath):
-    """获取文件系统记录的生成时间 / 创建时间，失败返回 None。"""
-    try:
-        stat_result = os.stat(filepath)
-    except OSError:
-        return None
-
-    birth_ts = getattr(stat_result, 'st_birthtime', None)
-    if birth_ts is None:
-        return None
-
-    try:
-        return datetime.fromtimestamp(birth_ts)
-    except (OSError, OverflowError, ValueError):
-        return None
-
-
-def is_reasonable_media_datetime(dt):
-    """过滤明显无效的媒体时间，如 QuickTime 默认纪元或异常未来时间。"""
-    if dt is None:
-        return False
-    current_year = datetime.now().year
-    return 1970 <= dt.year <= current_year + 1
-
-
-def parse_quicktime_datetime(seconds_since_1904):
-    """解析 QuickTime/MP4 中以 1904-01-01 为起点的创建时间。"""
-    try:
-        unix_seconds = int(seconds_since_1904) - 2082844800
-        dt = datetime.fromtimestamp(unix_seconds)
-    except (OSError, OverflowError, ValueError):
-        return None
-    return dt if is_reasonable_media_datetime(dt) else None
-
-
-def read_atom_header(f):
-    """读取 MP4/MOV atom 头，返回 (atom_type, payload_start, atom_end)。"""
-    start = f.tell()
-    header = f.read(8)
-    if len(header) < 8:
-        return None
-
-    size = int.from_bytes(header[:4], 'big')
-    atom_type = header[4:8]
-    header_size = 8
-
-    if size == 1:
-        large_size_bytes = f.read(8)
-        if len(large_size_bytes) < 8:
-            return None
-        size = int.from_bytes(large_size_bytes, 'big')
-        header_size = 16
-    elif size == 0:
-        try:
-            current = f.tell()
-            f.seek(0, os.SEEK_END)
-            size = f.tell() - start
-            f.seek(current)
-        except OSError:
-            return None
-
-    if size < header_size:
-        return None
-
-    payload_start = start + header_size
-    atom_end = start + size
-    return atom_type, payload_start, atom_end
-
-
-def read_mvhd_creation_datetime(f, atom_end):
-    """读取 mvhd atom 中的 creation_time。"""
-    payload = f.read(min(20, max(0, atom_end - f.tell())))
-    if len(payload) < 8:
-        return None
-
-    version = payload[0]
-    try:
-        if version == 0:
-            if len(payload) < 8:
-                return None
-            seconds_since_1904 = int.from_bytes(payload[4:8], 'big')
-        elif version == 1:
-            if len(payload) < 16:
-                more = f.read(16 - len(payload))
-                payload += more
-            if len(payload) < 16:
-                return None
-            seconds_since_1904 = int.from_bytes(payload[4:12], 'big')
-        else:
-            return None
-    except (TypeError, ValueError):
-        return None
-
-    return parse_quicktime_datetime(seconds_since_1904)
-
-
-def get_quicktime_creation_datetime(filepath):
-    """尝试读取 .mov/.mp4/.m4v 等文件容器内的创建时间，失败返回 None。"""
-    try:
-        with open(filepath, 'rb') as f:
-            f.seek(0, os.SEEK_END)
-            file_end = f.tell()
-            f.seek(0)
-
-            while f.tell() < file_end:
-                header = read_atom_header(f)
-                if header is None:
-                    return None
-                atom_type, payload_start, atom_end = header
-                if atom_end > file_end:
-                    return None
-
-                if atom_type == b'moov':
-                    f.seek(payload_start)
-                    while f.tell() < atom_end:
-                        child_header = read_atom_header(f)
-                        if child_header is None:
-                            return None
-                        child_type, child_payload_start, child_end = child_header
-                        if child_end > atom_end:
-                            return None
-                        if child_type == b'mvhd':
-                            f.seek(child_payload_start)
-                            return read_mvhd_creation_datetime(f, child_end)
-                        f.seek(child_end)
-                    return None
-
-                f.seek(atom_end)
-    except (OSError, ValueError):
-        return None
-    return None
-
-
-def get_video_datetime(filepath) -> datetime:
-    """
-    获取视频归档时间。
-
-    优先级：视频容器创建时间 -> 文件系统生成时间 -> 文件修改时间。
-    始终返回一个有效的 datetime 对象（最后回退到文件修改时间）。
-    """
-    for dt in (
-        get_quicktime_creation_datetime(filepath),
-        get_file_birth_datetime(filepath),
-        get_file_mtime_datetime(filepath),
-    ):
-        if is_reasonable_media_datetime(dt):
-            assert dt is not None
-            return dt
-    return get_file_mtime_datetime(filepath)
-
-
 def get_mtime_year(filepath):
     """获取文件修改时间对应的年份"""
     return get_file_mtime_datetime(filepath).year
@@ -393,15 +241,10 @@ def classify_file(filepath, ext, other_image_exts, camera_photo_counts=None):
     根据文件后缀与 EXIF 拍摄时间确定文件分类。
 
     返回 (category, year, detail):
-        category: 'video' | 'camera_photo' | 'photo' | 'other' | None（None 表示不处理该文件）
+        category: 'camera_photo' | 'photo' | 'other' | None（None 表示不处理该文件）
         year:     归档所属年份（int）
         detail:   拍摄月份，或 category == 'camera_photo' 时的相机型号目录名
     """
-    if ext in VIDEO_EXTS:
-        # 视频文件：按视频创建时间 / 文件生成时间 / 修改时间归入年份目录 -> 视频文件/
-        dt = get_video_datetime(filepath)
-        return 'video', dt.year, None
-
     if ext in PHOTO_EXTS:
         dt = get_exif_datetime(filepath)
         if dt is not None:
@@ -420,7 +263,7 @@ def classify_file(filepath, ext, other_image_exts, camera_photo_counts=None):
         # png/bmp 等其他类型图片文件，或用户自定义的额外后缀
         return 'other', get_mtime_year(filepath), None
 
-    # 其他类型文件（非视频、非图片）不处理
+    # 非图片文件不处理
     return None, None, None
 
 
@@ -526,8 +369,7 @@ def remove_empty_dirs(root_dir):
 # ============================================================
 
 def write_log_file(target_dir, stats):
-    """将本次运行的统计信息写入 target_dir/phototidy_log.txt"""
-    log_path = os.path.join(target_dir, 'phototidy_log.txt')
+    """写入带日期和递增序号的日志文件，确保已有日志不会被覆盖。"""
     lines = []
     lines.append("=" * 50)
     lines.append("PhotoTidy 运行日志")
@@ -579,10 +421,18 @@ def write_log_file(target_dir, stats):
     lines.append("")
 
     os.makedirs(target_dir, exist_ok=True)
-    with open(log_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines))
-
-    return log_path
+    date_text = datetime.now().strftime('%Y%m%d')
+    log_content = '\n'.join(lines)
+    sequence = 1
+    while True:
+        filename = f"{LOG_PREFIX}_{date_text}_{sequence:03d}.txt"
+        log_path = os.path.join(target_dir, filename)
+        try:
+            with open(log_path, 'x', encoding='utf-8') as f:
+                f.write(log_content)
+            return log_path
+        except FileExistsError:
+            sequence += 1
 
 
 def make_error_stats(error_msg):
@@ -729,9 +579,7 @@ def organize_files(source_dir, target_dir, mode, extra_exts,
             stats['exif_time_count'] += 1
 
         year_folder = f"{year}年照片集"
-        if category == 'video':
-            sub_folder: str = '视频文件'
-        elif category == 'camera_photo':
+        if category == 'camera_photo':
             sub_folder = str(detail) if detail else '其他图片文件'
         elif category == 'photo' and isinstance(detail, int):
             sub_folder = MONTH_TO_FOLDER[detail]
@@ -775,7 +623,7 @@ def organize_files(source_dir, target_dir, mode, extra_exts,
     # 计算需耗时间
     stats['elapsed_time'] = time() - start_time
     
-    write_log_file(target_dir, stats)
+    stats['log_path'] = write_log_file(target_dir, stats)
     return stats
 
 
@@ -828,7 +676,7 @@ class PhotoTidyApp:
         tk.Label(self.root, text="PhotoTidy 照片分类整理工具", font=FONT_BOLD).pack(pady=(16, 4))
         tk.Label(
             self.root,
-            text="按拍摄时间将照片 / 视频归档到目标目录，截图与其他图片归入“其他图片文件”",
+            text="按拍摄时间将照片归档到目标目录，截图与其他图片归入“其他图片文件”",
             font=FONT_SMALL, fg='#666666'
         ).pack(pady=(0, 12))
 
@@ -1044,7 +892,8 @@ class PhotoTidyApp:
                         f"成功归档：{stats['success_count']}\n"
                         f"失败：{stats['fail_count']}\n"
                         f"跳过（不支持的类型）：{stats['skip_count']}\n\n"
-                        f"详细日志已写入目标目录下的 phototidy_log.txt"
+                        f"详细日志已写入目标目录下的 "
+                        f"{os.path.basename(stats.get('log_path', ''))}"
                     )
 
                 elif kind == 'error':
