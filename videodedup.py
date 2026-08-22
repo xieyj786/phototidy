@@ -20,14 +20,16 @@ VideoDedup —— 视频查重整理工具
         视频文件集/
         ├── YYYY年视频文件/
         ├── ...
-        ├── 重复视频文件/          # 查出的重复文件（平铺存放）
+        ├── 重复视频文件/          # 查出的重复文件（按年份子目录归类）
+        │   └── YYYY年视频文件/
         └── videodedup_log_20260712_001.txt   # 运行日志（日期+三位序号命名）
 
-    每个重复组保留修改时间最早的一份，其余移动到「重复视频文件」目录，并在日志中
+    每个重复组保留修改时间最早的一份，其余移动到「重复视频文件/年份子目录」中，并在日志中
     记录完整对应关系。
 """
 
 import os
+import re
 import shutil
 import threading
 import queue
@@ -43,7 +45,9 @@ from tkinter import filedialog, messagebox, ttk
 # 常量定义
 # ============================================================
 
-DEFAULT_EXTENSIONS_TEXT = ".mp4,.mov,.avi"
+REQUIRED_VIDEO_EXTENSIONS_ORDER = ('.mov', '.mp4', '.avi', '.m2ts')
+REQUIRED_VIDEO_EXTENSIONS = frozenset(REQUIRED_VIDEO_EXTENSIONS_ORDER)
+DEFAULT_EXTENSIONS_TEXT = ",".join(REQUIRED_VIDEO_EXTENSIONS_ORDER)
 DUP_DIR_NAME = "重复视频文件"
 
 HASH_CHUNK_SIZE = 8 * 1024 * 1024  # 8MB，分块读取，适合大视频文件
@@ -96,7 +100,7 @@ def parse_extensions(text):
     规范化为小写、带前导点的集合，例如 ".mp4,.mov, avi" -> {'.mp4', '.mov', '.avi'}
     """
     if not text:
-        return set()
+        return set(REQUIRED_VIDEO_EXTENSIONS)
     raw = text.replace('，', ',').replace(' ', ',')
     result = set()
     for item in raw.split(','):
@@ -106,7 +110,9 @@ def parse_extensions(text):
         if not item.startswith('.'):
             item = '.' + item
         result.add(item)
-    return result
+    # 这四种格式是程序必须统一处理的基础视频格式。即使旧配置或用户输入
+    # 中缺少其中某项，也要补齐；用户仍可在界面中添加其他扩展名。
+    return result | REQUIRED_VIDEO_EXTENSIONS
 
 
 def compute_sha256(filepath, chunk_size=HASH_CHUNK_SIZE):
@@ -137,24 +143,45 @@ def get_mtime_for_sort(filepath):
         return float('inf')
 
 
-def get_unique_target_path(dup_dir, filename):
+def get_unique_target_path(target_dir, filename):
     """
-    如果重复目录下已存在同名文件，则在文件名后加序号，避免覆盖。
+    如果目标目录下已存在同名文件，则在文件名后加序号，避免覆盖。
     例如 IMG_0001.MOV -> IMG_0001_1.MOV
     """
     base, ext = os.path.splitext(filename)
-    candidate = os.path.join(dup_dir, filename)
+    candidate = os.path.join(target_dir, filename)
     counter = 1
     while os.path.exists(candidate):
-        candidate = os.path.join(dup_dir, f"{base}_{counter}{ext}")
+        candidate = os.path.join(target_dir, f"{base}_{counter}{ext}")
         counter += 1
     return candidate
 
 
+def get_year_folder_name(filepath):
+    """根据文件路径或修改时间推断归档年份目录名，例如 2023年视频文件。"""
+    try:
+        path_parts = [p for p in os.path.normpath(filepath).split(os.sep) if p]
+        for part in reversed(path_parts):
+            match = re.search(r'(\d{4})年', part)
+            if match:
+                return f"{match.group(1)}年视频文件"
+            if re.fullmatch(r'\d{4}', part):
+                return f"{part}年视频文件"
+    except Exception:
+        pass
+
+    try:
+        year = datetime.fromtimestamp(os.path.getmtime(filepath)).year
+    except OSError:
+        year = datetime.now().year
+    return f"{year}年视频文件"
+
+
 def move_to_duplicate_dir(filepath, dup_dir):
-    """将重复文件移动到「重复视频文件」目录（平铺存放），返回目标路径"""
-    os.makedirs(dup_dir, exist_ok=True)
-    target_path = get_unique_target_path(dup_dir, os.path.basename(filepath))
+    """将重复文件移动到「重复视频文件」下的年份子目录，返回目标路径。"""
+    year_dir = os.path.join(dup_dir, get_year_folder_name(filepath))
+    os.makedirs(year_dir, exist_ok=True)
+    target_path = get_unique_target_path(year_dir, os.path.basename(filepath))
     shutil.move(filepath, target_path)
     return target_path
 
@@ -305,6 +332,7 @@ def write_log_file(library_dir, stats, extensions_text):
     lines.append("=" * 50)
     lines.append("VideoDedup 运行日志")
     lines.append(f"运行时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"要去重的文件目录：{os.path.abspath(library_dir)}")
     lines.append(f"处理扩展名：{extensions_text}")
     lines.append("判重方式：文件大小 + SHA-256 哈希完全一致")
     lines.append("=" * 50)
@@ -410,8 +438,7 @@ def run_dedup(library_dir, extensions, progress_cb=None, log_cb=None, stop_flag=
             log_cb(f"[失败] 查重过程出错：{e}")
 
     if log_cb:
-        log_cb(f"\n===== 完成：共 {stats['total_dup_count']} 个重复文件已移入「{DUP_DIR_NAME}」 =====")
-
+            log_cb(f"\n===== 完成：共 {stats['total_dup_count']} 个重复文件已移入「{DUP_DIR_NAME}/年份子目录」 =====")
     stats['elapsed_seconds'] = time.perf_counter() - start_time
     write_log_file(library_dir, stats, ','.join(sorted(extensions)))
     return stats
@@ -434,7 +461,19 @@ class VideoDedupApp:
 
         self._build_ui()
         self._load_last_settings()
+        self.root.after_idle(self._bring_window_to_front)
         self.root.after(100, self._poll_queue)
+
+    def _bring_window_to_front(self):
+        """程序启动时将主窗口显示到最前面，然后取消永久置顶。"""
+        self.root.deiconify()
+        self.root.lift()
+        try:
+            self.root.attributes('-topmost', True)
+            self.root.focus_force()
+            self.root.after(300, lambda: self.root.attributes('-topmost', False))
+        except tk.TclError:
+            pass
 
     # ---------------------------------------------------
     def _build_ui(self):
@@ -446,7 +485,7 @@ class VideoDedupApp:
         tk.Label(self.root, text="VideoDedup 视频查重整理工具", font=FONT_BOLD).pack(pady=(16, 4))
         tk.Label(
             self.root,
-            text="按 大小+SHA-256哈希 判断重复视频，重复文件移入「重复视频文件」目录",
+            text="按 大小+SHA-256哈希 判断重复视频，重复文件移入「重复视频文件/年份子目录」",
             font=FONT_SMALL, fg='#666666'
         ).pack(pady=(0, 12))
 
@@ -472,7 +511,7 @@ class VideoDedupApp:
         info_frame.pack(fill='x', padx=16, pady=(0, 8))
         tk.Label(
             info_frame,
-            text="扩展名用英文逗号分隔，如 .mp4,.mov,.avi,.mkv,.m4v；判重仅依据 大小完全一致 + SHA-256哈希完全一致",
+            text="扩展名用英文逗号分隔，如 .mp4,.mov,.avi,.m2ts,.mkv,.m4v；判重仅依据 大小完全一致 + SHA-256哈希完全一致",
             font=FONT_SMALL, fg='#888888', justify='left'
         ).pack(side='left')
 
@@ -529,7 +568,9 @@ class VideoDedupApp:
             self.library_var.set(last_library)
         last_extensions = cfg.get('extensions')
         if last_extensions:
-            self.extensions_var.set(last_extensions)
+            normalized = parse_extensions(last_extensions)
+            extras = sorted(normalized - REQUIRED_VIDEO_EXTENSIONS)
+            self.extensions_var.set(','.join(REQUIRED_VIDEO_EXTENSIONS_ORDER + tuple(extras)))
 
     # ---------------------------------------------------
     def _start(self):
@@ -549,7 +590,7 @@ class VideoDedupApp:
             "确认",
             f"将扫描目录：{library}\n"
             f"处理扩展名：{', '.join(sorted(extensions))}\n\n"
-            "查出的重复文件将被移动到「重复视频文件」目录（源处不留）。\n"
+            "查出的重复文件将被移动到「重复视频文件/年份子目录」中（源处不留）。\n"
             "此操作不可逆，是否继续？"
         ):
             return

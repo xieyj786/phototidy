@@ -5,24 +5,20 @@ PhotoTidy —— 照片分类整理工具
 
 功能概述：
     从杂乱的源目录中整理出真实拍摄的照片，以及截图、转发图片等其他图片，
-    按拍摄时间（或修改时间）与文件类型，分类归档到目标目录：
+    按拍摄时间与文件类型，分类归档到目标目录：
 
     photo-tidy/
     ├── YYYY年照片集/
     │   ├── 相机型号拍摄照片/   # 根据 EXIF Model 生成，如 DSC-RX100M3拍摄照片
-    │   ├── 1-2月照片/         # 拍摄时间在1、2月的照片
-    │   ├── 3-4月照片/
-    │   ├── 5-6月照片/
-    │   ├── 7-8月照片/
-    │   ├── 9-10月照片/
-    │   ├── 11-12月照片/
-    │   └── 其他图片文件/       # 截图、转发图片、无拍摄时间的图片等
+    │   │   └── YYYY年MM月DD日/
+    │   ├── YYYY年MM月照片/     # 有拍摄时间的非相机照片
+    │   ├── YYYY年其他图片文件/ # 无拍摄时间的照片
+    │   └── YYYY年截图类文件/   # PNG、BMP、GIF 等截图或转发图片
     └── phototidy_log_YYYYMMDD_NNN.txt  # 运行日志
 
     操作模式：
       - 拷贝（安全）：从源目录复制文件到目标目录，源文件保留
-      - 移动（彻底整理）：从源目录移动文件到目标目录；若源目录下某子目录
-        因移动而变为空目录，则自动删除该空目录
+      - 移动（彻底整理）：从源目录移动文件到目标目录，保留移动后的空目录
 """
 
 import os
@@ -62,17 +58,6 @@ except ImportError:
 
 PHOTO_EXTS = {'.jpg', '.jpeg', '.heic', '.heif'}
 DEFAULT_OTHER_IMAGE_EXTS = {'.png', '.bmp', '.gif', '.tiff', '.tif', '.webp'}
-CAMERA_PHOTO_MIN_COUNT = 10
-
-# 月份 -> 目标子目录名
-MONTH_TO_FOLDER = {
-    1: '1-2月照片', 2: '1-2月照片',
-    3: '3-4月照片', 4: '3-4月照片',
-    5: '5-6月照片', 6: '5-6月照片',
-    7: '7-8月照片', 8: '7-8月照片',
-    9: '9-10月照片', 10: '9-10月照片',
-    11: '11-12月照片', 12: '11-12月照片',
-}
 
 # EXIF 中可能包含拍摄时间的标签：DateTimeOriginal, DateTimeDigitized, DateTime
 EXIF_DATETIME_TAGS = (36867, 36868, 306)
@@ -236,12 +221,13 @@ def get_mtime_year(filepath):
 # 核心逻辑：分类
 # ============================================================
 
-def classify_file(filepath, ext, other_image_exts, camera_photo_counts=None):
+def classify_file(filepath, ext, other_image_exts):
     """
     根据文件后缀与 EXIF 拍摄时间确定文件分类。
 
     返回 (category, year, detail):
-        category: 'camera_photo' | 'photo' | 'other' | None（None 表示不处理该文件）
+        category: 'camera_photo' | 'photo' | 'other' | 'screenshot' | None
+                  （None 表示不处理该文件）
         year:     归档所属年份（int）
         detail:   拍摄月份，或 category == 'camera_photo' 时的相机型号目录名
     """
@@ -251,17 +237,15 @@ def classify_file(filepath, ext, other_image_exts, camera_photo_counts=None):
             make, model = get_exif_camera_make_model(filepath)
             if is_standalone_camera(make, model):
                 camera_folder = get_camera_photo_folder(model)
-                count_key = (dt.year, camera_folder)
-                if camera_photo_counts and camera_photo_counts.get(count_key, 0) >= CAMERA_PHOTO_MIN_COUNT:
-                    return 'camera_photo', dt.year, camera_folder
+                return 'camera_photo', dt.year, camera_folder
             # 有 EXIF 拍摄时间 -> 按拍摄时间的年/月归档
             return 'photo', dt.year, dt.month
         # 没有 / 无法解析拍摄时间 -> 其他图片文件
         return 'other', get_mtime_year(filepath), None
 
     if ext in other_image_exts:
-        # png/bmp 等其他类型图片文件，或用户自定义的额外后缀
-        return 'other', get_mtime_year(filepath), None
+        # PNG、BMP、GIF 及用户指定的其他图片类型归入截图类文件。
+        return 'screenshot', get_mtime_year(filepath), None
 
     # 非图片文件不处理
     return None, None, None
@@ -345,35 +329,20 @@ def get_unique_target_path(target_dir, filename):
     return os.path.join(target_dir, f"{name}_T{timestamp}{ext}")
 
 
-def remove_empty_dirs(root_dir):
-    """
-    移动模式下，自底向上清理源目录中变为空的子目录
-    （不删除 root_dir 本身）。返回被删除的目录列表。
-    """
-    removed = []
-    root_abs = os.path.abspath(root_dir)
-    for dirpath, dirnames, filenames in os.walk(root_dir, topdown=False):
-        if os.path.abspath(dirpath) == root_abs:
-            continue
-        try:
-            if not os.listdir(dirpath):
-                os.rmdir(dirpath)
-                removed.append(dirpath)
-        except OSError:
-            pass
-    return removed
-
-
 # ============================================================
 # 核心逻辑：日志写入
 # ============================================================
 
-def write_log_file(target_dir, stats):
+def write_log_file(target_dir, stats, source_dir=None):
     """写入带日期和递增序号的日志文件，确保已有日志不会被覆盖。"""
     lines = []
     lines.append("=" * 50)
     lines.append("PhotoTidy 运行日志")
     lines.append(f"运行时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    if source_dir is not None:
+        lines.append(f"输入文件目录：{os.path.abspath(source_dir)}")
+    lines.append(f"输出文件目录：{os.path.abspath(target_dir)}")
+    lines.append(f"整理方式：{'拷贝' if stats.get('mode') == 'copy' else '移动'}")
     lines.append("=" * 50)
     lines.append("")
 
@@ -464,7 +433,7 @@ def organize_files(source_dir, target_dir, mode, extra_exts,
         source_dir : 源目录路径
         target_dir : 目标根目录路径
         mode       : 'copy'（拷贝） 或 'move'（移动）
-        extra_exts : 额外识别为“其他图片文件”的后缀集合，如 {'.gif', '.webp'}
+        extra_exts : 额外识别为“截图类文件”的后缀集合，如 {'.avif', '.webp'}
         progress_cb: 回调 (done, total, filepath)，用于更新进度
         log_cb     : 回调 (text)，用于输出处理日志
         stop_flag  : threading.Event，用于中途停止
@@ -510,6 +479,7 @@ def organize_files(source_dir, target_dir, mode, extra_exts,
     other_image_exts = set(DEFAULT_OTHER_IMAGE_EXTS) | set(extra_exts)
 
     stats = {
+        'mode': mode,
         'total_files': 0,
         'ext_counts': {},
         'exif_time_count': 0,
@@ -522,6 +492,9 @@ def organize_files(source_dir, target_dir, mode, extra_exts,
         'elapsed_time': 0,
     }
 
+    if log_cb:
+        log_cb(f"[整理方式] {'拷贝' if mode == 'copy' else '移动'}")
+
     # 先扫描出所有文件，便于显示总进度
     all_files = []
     for dirpath, dirnames, filenames in os.walk(source_dir):
@@ -530,22 +503,6 @@ def organize_files(source_dir, target_dir, mode, extra_exts,
 
     stats['total_files'] = len(all_files)
     total = len(all_files) or 1
-
-    camera_photo_counts = {}
-    for filepath in all_files:
-        ext = os.path.splitext(filepath)[1].lower()
-        if ext not in PHOTO_EXTS:
-            continue
-        dt = get_exif_datetime(filepath)
-        if dt is None:
-            continue
-        make, model = get_exif_camera_make_model(filepath)
-        if not is_standalone_camera(make, model):
-            continue
-        camera_folder = get_camera_photo_folder(model)
-        count_key = (dt.year, camera_folder)
-        camera_photo_counts[count_key] = camera_photo_counts.get(count_key, 0) + 1
-    stats['standalone_camera_photo_count'] = sum(camera_photo_counts.values())
 
     for idx, filepath in enumerate(all_files):
         if stop_flag is not None and stop_flag.is_set():
@@ -557,7 +514,7 @@ def organize_files(source_dir, target_dir, mode, extra_exts,
         stats['ext_counts'][ext] = stats['ext_counts'].get(ext, 0) + 1
 
         try:
-            category, year, detail = classify_file(filepath, ext, other_image_exts, camera_photo_counts)
+            category, year, detail = classify_file(filepath, ext, other_image_exts)
         except (ValueError, OSError, IOError) as e:
             stats['fail_count'] += 1
             stats['fail_details'].append(f"{filepath} : 分类时出错 - {e}")
@@ -577,16 +534,31 @@ def organize_files(source_dir, target_dir, mode, extra_exts,
 
         if category in ('photo', 'camera_photo'):
             stats['exif_time_count'] += 1
+        if category == 'camera_photo':
+            stats['standalone_camera_photo_count'] += 1
 
         year_folder = f"{year}年照片集"
-        if category == 'camera_photo':
-            sub_folder = str(detail) if detail else '其他图片文件'
-        elif category == 'photo' and isinstance(detail, int):
-            sub_folder = MONTH_TO_FOLDER[detail]
-        else:
-            sub_folder = '其他图片文件'
 
-        target_subdir = os.path.join(target_dir, year_folder, sub_folder)
+        if category == 'camera_photo':
+            # 相机照片：按相机型号目录，再按拍摄日期细分为 YYYY年MM月DD日
+            camera_folder = str(detail) if detail else '未知型号拍摄照片'
+            dt = get_exif_datetime(filepath)
+            if dt is None:
+                dt = get_file_mtime_datetime(filepath)
+            date_folder = f"{dt.year}年{dt.month:02d}月{dt.day:02d}日"
+            target_subdir = os.path.join(target_dir, year_folder, camera_folder, date_folder)
+
+        elif category == 'photo' and isinstance(detail, int):
+            # 有拍摄时间的非相机照片：放在 YYYY年MM月照片 子目录
+            month = detail
+            sub_folder = f"{year}年{month:02d}月照片"
+            target_subdir = os.path.join(target_dir, year_folder, sub_folder)
+
+        elif category == 'other':
+            target_subdir = os.path.join(target_dir, year_folder, f"{year}年其他图片文件")
+
+        else:
+            target_subdir = os.path.join(target_dir, year_folder, f"{year}年截图类文件")
 
         try:
             os.makedirs(target_subdir, exist_ok=True)
@@ -613,17 +585,10 @@ def organize_files(source_dir, target_dir, mode, extra_exts,
         if progress_cb:
             progress_cb(idx + 1, total, filepath)
 
-    # 移动模式：清理源目录中产生的空子目录
-    if mode == 'move':
-        removed_dirs = remove_empty_dirs(source_dir)
-        if log_cb:
-            for d in removed_dirs:
-                log_cb(f"[清理] 删除空目录：{d}")
-
     # 计算需耗时间
     stats['elapsed_time'] = time() - start_time
     
-    stats['log_path'] = write_log_file(target_dir, stats)
+    stats['log_path'] = write_log_file(target_dir, stats, source_dir)
     return stats
 
 
@@ -663,7 +628,24 @@ class PhotoTidyApp:
         self.worker_thread = None
 
         self._build_ui()
+        self.root.after_idle(self._bring_window_to_front)
         self.root.after(100, self._poll_queue)
+
+    def _bring_window_to_front(self):
+        """程序启动时将主窗口显示到最前面。
+
+        短暂启用 topmost 后立即取消，既能唤起窗口，又不会让它
+        在后续使用中始终遮挡其他程序。
+        """
+        self.root.deiconify()
+        self.root.lift()
+        try:
+            self.root.attributes('-topmost', True)
+            self.root.focus_force()
+            self.root.after(300, lambda: self.root.attributes('-topmost', False))
+        except tk.TclError:
+            # 某些窗口管理器不支持 topmost，lift 仍可正常生效。
+            pass
 
     # ---------------------------------------------------
     def _build_ui(self):
@@ -676,7 +658,7 @@ class PhotoTidyApp:
         tk.Label(self.root, text="PhotoTidy 照片分类整理工具", font=FONT_BOLD).pack(pady=(16, 4))
         tk.Label(
             self.root,
-            text="按拍摄时间将照片归档到目标目录，截图与其他图片归入“其他图片文件”",
+            text="按拍摄时间整理照片，截图与转发图片单独归入“年份截图类文件”",
             font=FONT_SMALL, fg='#666666'
         ).pack(pady=(0, 12))
 
@@ -721,13 +703,13 @@ class PhotoTidyApp:
         self.mode_var = tk.StringVar(value='copy')
         tk.Radiobutton(frame3, text="拷贝（安全，保留源文件）", variable=self.mode_var,
                         value='copy', font=FONT).pack(side='left', padx=4)
-        tk.Radiobutton(frame3, text="移动（彻底整理，清空空目录）", variable=self.mode_var,
+        tk.Radiobutton(frame3, text="移动（保留空目录）", variable=self.mode_var,
                         value='move', font=FONT, fg='#cc4444').pack(side='left', padx=12)
 
-        # 3. 其他图片额外后缀
+        # 3. 截图类图片额外后缀
         frame4 = tk.Frame(self.root)
         frame4.pack(fill='x', padx=16, pady=4)
-        tk.Label(frame4, text="3. 其他图片额外后缀：", width=18, anchor='w', font=FONT).pack(side='left')
+        tk.Label(frame4, text="3. 截图类额外后缀：", width=18, anchor='w', font=FONT).pack(side='left')
         self.extra_ext_var = tk.StringVar()
         tk.Entry(frame4, textvariable=self.extra_ext_var, font=FONT).pack(
             side='left', fill='x', expand=True, padx=(0, 8))
@@ -810,7 +792,7 @@ class PhotoTidyApp:
             if not messagebox.askyesno(
                 "确认",
                 "移动模式将把文件从源目录移动到目标目录，\n"
-                "并删除源目录下因移动而产生的空子目录。\n\n"
+                "移动后的空目录将保留。\n\n"
                 "此操作不可逆，是否继续？"
             ):
                 return

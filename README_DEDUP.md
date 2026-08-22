@@ -49,8 +49,14 @@ Scanned image extensions:
 - `.jpeg`
 - `.heic`
 - `.heif`
+- `.png`
+- `.bmp`
+- `.gif`
+- `.tiff`
+- `.tif`
+- `.webp`
 
-Perceptual visual de-duplication mainly targets JPEG files. HEIC/HEIF files participate in global MD5 checks and capture-time grouping.
+All scanned formats participate in global MD5 exact duplicate detection. JPEG and PhotoTidy's other default image formats (`.png`, `.bmp`, `.gif`, `.tiff`, `.tif`, `.webp`) also participate in perceptual visual de-duplication. HEIC/HEIF files participate in global MD5 checks and capture-time grouping.
 
 ## Date Detection
 
@@ -72,7 +78,7 @@ For each image, PhotoDedup tries to determine capture time:
 5. Run de-duplication stages:
    - Global MD5 exact duplicate detection
    - Same-second capture-time duplicate detection
-   - JPEG perceptual hash duplicate detection
+   - Perceptual hash duplicate detection
 6. Move duplicate files to `重复图片文件/<TopLevelFolder>/`.
 7. Write `photodedup_log_YYYYMMDD_NNN.txt`; runs on the same day increment the three-digit sequence.
 
@@ -102,25 +108,25 @@ Extension groups:
 Two checks run inside each group:
 
 1. Filename timestamp copies: if normalized filename timestamps match, they are treated as likely duplicate-copy names such as `(1)` or `_1`; the largest file is kept.
-2. JPEG visual similarity: same-second JPEGs are compared with dHash, then confirmed with grayscale histogram correlation. Similar files keep the largest version.
+2. JPEG visual similarity: same-second JPEGs are compared with dHash. When the dHash Hamming distance is less than or equal to the UI threshold, the files are directly treated as duplicates and the largest version is kept. Candidates above that threshold may then use grayscale histogram correlation as confirmation.
 
 The same-second visual check uses more permissive internal candidate thresholds:
 
 - `SAME_TIME_DHASH_THRESHOLD = 8`
 - `SAME_TIME_HIST_CONFIRM_THRESHOLD = 0.90`
 
-The UI dHash threshold is still used first for strict matching.
+The UI dHash threshold is the direct duplicate rule for same-capture-time files: `dHash distance <= user threshold` means duplicate. The internal threshold and histogram are only used for candidates above the UI threshold.
 
-### 3. JPEG Perceptual Hash Deduplication
+### 3. Perceptual Hash Deduplication
 
-This stage processes only remaining `.jpg/.jpeg` files.
+This stage processes remaining JPEG and PhotoTidy default other-image formats (`.png`, `.bmp`, `.gif`, `.tiff`, `.tif`, `.webp`).
 
 It has two phases:
 
-1. JPEG files without real EXIF capture time are compared with each other. Similar files are clustered, and the largest file is kept.
-2. JPEG files with real EXIF capture time are compared against the remaining JPEGs without real EXIF time. If similar, the file with real EXIF time is kept.
+1. Eligible image files without real EXIF capture time are compared with each other. Similar files are clustered, and the largest file is kept.
+2. Eligible image files with real EXIF capture time are compared against the remaining files without real EXIF time. If similar, the file with real EXIF time is kept.
 
-JPEG files with real EXIF capture time are not compared against each other in this stage, reducing cross-time false positives.
+Eligible image files with real EXIF capture time are not compared against each other in this stage, reducing cross-time false positives.
 
 ## dHash and Histogram Confirmation
 
@@ -233,8 +239,14 @@ PhotoDedup 以图片库下的一级子目录为单位独立查重，不会跨一
 - `.jpeg`
 - `.heic`
 - `.heif`
+- `.png`
+- `.bmp`
+- `.gif`
+- `.tiff`
+- `.tif`
+- `.webp`
 
-其中感知哈希视觉查重主要针对 JPEG；HEIC/HEIF 参与全局 MD5 和拍摄时间分组。
+所有支持格式均参与全局 MD5 完全查重。JPEG 和 PhotoTidy 默认支持的其他图片格式（`.png`、`.bmp`、`.gif`、`.tiff`、`.tif`、`.webp`）也参与感知哈希视觉查重；HEIC/HEIF 参与全局 MD5 和拍摄时间分组。
 
 ## 时间读取规则
 
@@ -256,7 +268,7 @@ PhotoDedup 以图片库下的一级子目录为单位独立查重，不会跨一
 5. 依次执行：
    - 全局 MD5 完全重复查重
    - 同秒拍摄组内重复查重
-   - JPEG 感知哈希查重
+   - 感知哈希查重
 6. 重复文件移动到 `重复图片文件/<一级子目录名>/`。
 7. 写入 `photodedup_log_YYYYMMDD_NNN.txt`；同一天多次运行时递增三位序号。
 
@@ -286,25 +298,25 @@ PhotoDedup 以图片库下的一级子目录为单位独立查重，不会跨一
 同组内执行两类判断：
 
 1. 文件名时间戳副本：如果文件名中解析出的规范化时间戳相同，通常代表 `(1)`、`_1` 等副本命名，保留体积最大者。
-2. JPEG 视觉相似：对同秒 JPEG 计算 dHash，并用灰度直方图相关系数辅助确认，相似时保留体积最大者。
+2. JPEG 视觉相似：对同秒 JPEG 计算 dHash。若 dHash 汉明距离小于等于界面设置的阈值，直接判定为重复并保留体积最大者；超过该阈值的候选才继续使用灰度直方图相关系数辅助确认。
 
 同秒视觉判断使用更宽松的内部候选阈值：
 
 - `SAME_TIME_DHASH_THRESHOLD = 8`
 - `SAME_TIME_HIST_CONFIRM_THRESHOLD = 0.90`
 
-但仍会优先使用界面设置的 dHash 阈值进行严格判断。
+界面设置的 dHash 阈值是同一拍摄时间下的直接判重标准：`dHash 距离 <= 用户设置阈值` 即判定为重复。内部阈值和直方图仅用于处理超过用户阈值但仍可能相似的候选。
 
-### 3. JPEG 感知哈希查重
+### 3. 感知哈希查重
 
-该步骤只处理尚未移除的 `.jpg/.jpeg` 文件。
+该步骤处理尚未移除的 JPEG 及 PhotoTidy 默认支持的其他图片格式（`.png`、`.bmp`、`.gif`、`.tiff`、`.tif`、`.webp`）。
 
 分两阶段：
 
-1. 无真实 EXIF 拍摄时间的 JPEG 之间互相比较，相似文件聚类后保留体积最大者。
-2. 有真实 EXIF 拍摄时间的 JPEG 与剩余无真实 EXIF 时间的 JPEG 比较。相似时优先保留有真实 EXIF 时间的文件。
+1. 无真实 EXIF 拍摄时间的可视觉查重图片之间互相比较，相似文件聚类后保留体积最大者。
+2. 有真实 EXIF 拍摄时间的可视觉查重图片与剩余无真实 EXIF 时间的图片比较。相似时优先保留有真实 EXIF 时间的文件。
 
-有真实 EXIF 拍摄时间的 JPEG 之间不会在该阶段互相比较，避免跨时间误判。
+有真实 EXIF 拍摄时间的可视觉查重图片之间不会在该阶段互相比较，避免跨时间误判。
 
 ## dHash 与直方图
 
@@ -400,7 +412,7 @@ The duplicate directory is excluded from future scans. Moved duplicates are stor
 
 ## Supported Formats
 
-The default extensions are `.mp4`, `.mov`, and `.avi`. The GUI accepts additional comma-, Chinese-comma-, or space-separated extensions such as `.mkv,.m4v,.mts`. Extensions only select candidate files; file contents are not validated as playable video.
+The default extensions are `.mp4`, `.mov`, `.avi`, and `.m2ts`. The GUI accepts additional comma-, Chinese-comma-, or space-separated extensions such as `.mkv,.m4v,.mts`. Extensions only select candidate files; file contents are not validated as playable video.
 
 ## Exact-Duplicate Algorithm
 
@@ -464,7 +476,7 @@ python3 videodedup.py
 
 ## 支持格式
 
-默认扩展名为 `.mp4`、`.mov`、`.avi`。界面允许用英文逗号、中文逗号或空格补充 `.mkv,.m4v,.mts` 等后缀。扩展名只用于筛选候选文件，程序不会验证文件是否能够正常播放。
+默认扩展名为 `.mp4`、`.mov`、`.avi`、`.m2ts`。界面允许用英文逗号、中文逗号或空格补充 `.mkv,.m4v,.mts` 等后缀。扩展名只用于筛选候选文件，程序不会验证文件是否能够正常播放。
 
 ## 精确查重算法
 

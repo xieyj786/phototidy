@@ -67,7 +67,9 @@ except ImportError:
 
 JPEG_EXTS = {'.jpg', '.jpeg'}
 HEIC_EXTS = {'.heic', '.heif'}
-HARD_DEDUP_EXTS = JPEG_EXTS | HEIC_EXTS
+OTHER_IMAGE_EXTS = {'.png', '.bmp', '.gif', '.tiff', '.tif', '.webp'}
+SUPPORTED_IMAGE_EXTS = JPEG_EXTS | HEIC_EXTS | OTHER_IMAGE_EXTS
+VISUAL_DEDUP_EXTS = JPEG_EXTS | OTHER_IMAGE_EXTS
 
 # EXIF 中可能包含拍摄时间的标签：DateTimeOriginal, DateTimeDigitized, DateTime
 EXIF_DATETIME_TAGS = (36867, 36868, 306)
@@ -127,14 +129,30 @@ def parse_exif_datetime(value):
         return None
 
 
-def get_exif_datetime(filepath):
+def _format_image_issue(stage, detail):
+    """Build a stable, human-readable description for an image read issue."""
+    return f"{stage}：{detail}"
+
+
+def _append_image_issue(info, stage, detail):
+    """Record an image issue once on its file-info dictionary."""
+    issue = _format_image_issue(stage, detail)
+    issues = info.setdefault('image_issues', [])
+    if issue not in issues:
+        issues.append(issue)
+
+
+def get_exif_datetime(filepath, issue_cb=None):
     """尝试读取图片的 EXIF 原始拍摄时间（DateTimeOriginal 等），失败返回 None"""
     try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings('ignore', category=UserWarning, module=r'PIL\..*')
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always', UserWarning)
             img = Image.open(filepath)
             with img:
                 exif = img.getexif()
+            if issue_cb:
+                for warning in caught:
+                    issue_cb(_format_image_issue('EXIF读取警告', warning.message))
             if not exif:
                 return None
 
@@ -155,7 +173,9 @@ def get_exif_datetime(filepath):
                 dt = parse_exif_datetime(value)
                 if dt is not None:
                     return dt
-    except Exception:
+    except Exception as e:
+        if issue_cb:
+            issue_cb(_format_image_issue('EXIF读取失败', e))
         return None
     return None
 
@@ -226,7 +246,7 @@ def get_image_pixel_data(img) -> list[int]:
     return list(cast(Iterable[int], img.getdata()))
 
 
-def compute_dhash(filepath, hash_size=8):
+def compute_dhash(filepath, hash_size=8, issue_cb=None):
     """
     计算图片的 dHash（差异哈希）。
     算法：缩放到 (hash_size+1) x hash_size 的灰度图，比较每行相邻像素的大小关系，
@@ -234,12 +254,17 @@ def compute_dhash(filepath, hash_size=8):
     失败返回 None。
     """
     try:
-        with Image.open(filepath) as img:
-            img = ImageOps.exif_transpose(img)
-            img = img.convert('L').resize(
-                (hash_size + 1, hash_size), Image.Resampling.LANCZOS
-            )
-            pixels = list(cast(Iterable[int], get_image_pixel_data(img)))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always', UserWarning)
+            with Image.open(filepath) as img:
+                img = ImageOps.exif_transpose(img)
+                img = img.convert('L').resize(
+                    (hash_size + 1, hash_size), Image.Resampling.LANCZOS
+                )
+                pixels = list(cast(Iterable[int], get_image_pixel_data(img)))
+            if issue_cb:
+                for warning in caught:
+                    issue_cb(_format_image_issue('dHash读取警告', warning.message))
 
             bits = []
             for row in range(hash_size):
@@ -253,7 +278,9 @@ def compute_dhash(filepath, hash_size=8):
             for b in bits:
                 value = (value << 1) | b
             return value
-    except Exception:
+    except Exception as e:
+        if issue_cb:
+            issue_cb(_format_image_issue('dHash读取失败', e))
         return None
 
 
@@ -264,14 +291,26 @@ def ensure_dhashes(infos):
         return
     if len(missing) < 16:
         for info in missing:
-            info['dhash'] = compute_dhash(info['path'])
+            info['dhash'] = compute_dhash(
+                info['path'],
+                issue_cb=lambda issue, item=info: _append_image_issue(
+                    item, '图片处理', issue
+                ),
+            )
         return
 
     max_workers = min(8, os.cpu_count() or 4, len(missing))
-    paths = [info['path'] for info in missing]
+    def compute_one(info):
+        issues = []
+        dhash = compute_dhash(info['path'], issue_cb=issues.append)
+        return dhash, issues
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for info, dhash in zip(missing, executor.map(compute_dhash, paths)):
+        for info, result in zip(missing, executor.map(compute_one, missing)):
+            dhash, issues = result
             info['dhash'] = dhash
+            for issue in issues:
+                _append_image_issue(info, '图片处理', issue)
 
 
 def hamming_distance(a, b):
@@ -416,7 +455,7 @@ def get_dhash_candidate_indices(info, bucket_map, chunk_bits: Optional[int] = 8)
     return result
 
 
-def compute_hist_corr(filepath, size=(256, 256), bins=64):
+def compute_hist_corr(filepath, size=(256, 256), bins=64, issue_cb=None):
     """
     计算图片灰度直方图，返回其归一化后的直方图数组。
     对 JPEG 重压缩、HDR/色调映射等处理具有很强的鲁棒性：
@@ -425,10 +464,15 @@ def compute_hist_corr(filepath, size=(256, 256), bins=64):
     失败返回 None。
     """
     try:
-        with Image.open(filepath) as img:
-            img = ImageOps.exif_transpose(img)
-            gray = img.convert('L').resize(size, Image.Resampling.LANCZOS)
-            raw_hist = gray.histogram()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always', UserWarning)
+            with Image.open(filepath) as img:
+                img = ImageOps.exif_transpose(img)
+                gray = img.convert('L').resize(size, Image.Resampling.LANCZOS)
+                raw_hist = gray.histogram()
+            if issue_cb:
+                for warning in caught:
+                    issue_cb(_format_image_issue('直方图读取警告', warning.message))
         if bins == 256:
             return raw_hist
         values_per_bin = 256 // bins
@@ -442,7 +486,9 @@ def compute_hist_corr(filepath, size=(256, 256), bins=64):
             idx = min(int(value * bins / 256), bins - 1)
             hist[idx] += count
         return hist
-    except Exception:
+    except Exception as e:
+        if issue_cb:
+            issue_cb(_format_image_issue('直方图读取失败', e))
         return None
 
 
@@ -482,9 +528,15 @@ def is_visually_similar(info_a, info_b, dhash_threshold):
         return False, None
 
     if 'hist' not in info_a:
-        info_a['hist'] = compute_hist_corr(info_a['path'])
+        info_a['hist'] = compute_hist_corr(
+            info_a['path'],
+            issue_cb=lambda issue: _append_image_issue(info_a, '图片处理', issue),
+        )
     if 'hist' not in info_b:
-        info_b['hist'] = compute_hist_corr(info_b['path'])
+        info_b['hist'] = compute_hist_corr(
+            info_b['path'],
+            issue_cb=lambda issue: _append_image_issue(info_b, '图片处理', issue),
+        )
 
     hist_a = info_a.get('hist')
     hist_b = info_b.get('hist')
@@ -505,13 +557,26 @@ def is_same_time_visually_similar(info_a, info_b, dhash_threshold):
     h_b = info_b.get('dhash')
     if h_a is None or h_b is None:
         return False, None
-    if hamming_distance(h_a, h_b) > SAME_TIME_DHASH_THRESHOLD:
+    distance = hamming_distance(h_a, h_b)
+
+    # 同一拍摄时间下，dHash 已达到用户设定阈值时直接判重。
+    # 不再用直方图二次确认否决距离为 0/1 的同图不同压缩版本。
+    if distance <= dhash_threshold:
+        return True, '同秒dHash直接命中'
+
+    if distance > SAME_TIME_DHASH_THRESHOLD:
         return False, None
 
     if 'hist' not in info_a:
-        info_a['hist'] = compute_hist_corr(info_a['path'])
+        info_a['hist'] = compute_hist_corr(
+            info_a['path'],
+            issue_cb=lambda issue: _append_image_issue(info_a, '图片处理', issue),
+        )
     if 'hist' not in info_b:
-        info_b['hist'] = compute_hist_corr(info_b['path'])
+        info_b['hist'] = compute_hist_corr(
+            info_b['path'],
+            issue_cb=lambda issue: _append_image_issue(info_b, '图片处理', issue),
+        )
 
     if hist_corr_score(info_a.get('hist'), info_b.get('hist')) >= SAME_TIME_HIST_CONFIRM_THRESHOLD:
         return True, '同秒dHash+直方图'
@@ -559,7 +624,7 @@ def file_size_safe(filepath):
 
 def scan_image_files(top_level_dir):
     """
-    递归扫描一级子目录下所有 .jpg/.jpeg/.heic/.heif 文件。
+    递归扫描一级子目录下 PhotoTidy 支持的所有图片文件。
     返回 file_info 列表，每项为字典：
         {
             'path': 完整路径,
@@ -575,10 +640,11 @@ def scan_image_files(top_level_dir):
             continue
         for fn in filenames:
             ext = os.path.splitext(fn)[1].lower()
-            if ext not in HARD_DEDUP_EXTS:
+            if ext not in SUPPORTED_IMAGE_EXTS:
                 continue
             filepath = os.path.join(dirpath, fn)
-            real_exif_dt = get_exif_datetime(filepath)
+            image_issues = []
+            real_exif_dt = get_exif_datetime(filepath, issue_cb=image_issues.append)
             filename_dt = get_filename_datetime(filepath)
             exif_dt = real_exif_dt or filename_dt
             filename_dt_key = get_filename_datetime_key(filepath)
@@ -588,6 +654,7 @@ def scan_image_files(top_level_dir):
                 'exif_dt': exif_dt,
                 'real_exif_dt': real_exif_dt,
                 'filename_dt_key': filename_dt_key,
+                'image_issues': image_issues,
             })
     return results
 
@@ -676,6 +743,7 @@ def hard_dedup(file_infos, dup_dir, threshold, log_cb=None):
         key = (info['exif_dt'].strftime('%Y-%m-%d %H:%M:%S'), ext_group)
         groups[key].append(info)
 
+
     hard_visual_candidates = []
     for infos in groups.values():
         if len(infos) < 2:
@@ -690,50 +758,12 @@ def hard_dedup(file_infos, dup_dir, threshold, log_cb=None):
         if len(infos) < 2:
             continue
 
+
         # ------ 视觉相似（仅 jpg/jpeg，拍摄时间相同但 MD5 不同）------
         survivors = [
             info for info in infos
             if not info.get('removed') and info['ext'] in JPEG_EXTS and info.get('_md5')
         ]
-        if len(survivors) < 2:
-            continue
-
-        # 文件名时间戳相同且同处一个拍摄时间组，通常是 "(1)"、"_1" 这类副本命名。
-        filename_groups = defaultdict(list)
-        for info in survivors:
-            key_name = info.get('filename_dt_key')
-            if key_name:
-                filename_groups[key_name].append(info)
-
-        for filename_key, same_name_infos in filename_groups.items():
-            active_infos = [info for info in same_name_infos if not info.get('removed')]
-            if len(active_infos) < 2:
-                continue
-            active_infos.sort(key=get_cached_file_size, reverse=True)
-            keep = active_infos[0]
-            for dup_info in active_infos[1:]:
-                try:
-                    target = move_to_duplicate_dir(dup_info['path'], dup_dir)
-                    dup_info['removed'] = True
-                    dup_count += 1
-                    dup_names.append(os.path.basename(target))
-                    dup_relations.append({
-                        'method': '同秒拍摄文件名副本重复',
-                        'duplicate': dup_info['path'],
-                        'kept': keep['path'],
-                        'moved_to': target,
-                    })
-                    if log_cb:
-                        log_cb(
-                            f"[硬查重-文件名副本重复] {dup_info['path']}\n"
-                            f"      与保留文件拍摄时间/文件名时间戳相同：{keep['path']}\n"
-                            f"      -> 移入：{target}"
-                        )
-                except Exception as e:
-                    if log_cb:
-                        log_cb(f"[硬查重-失败] {dup_info['path']} : {e}")
-
-        survivors = [info for info in survivors if not info.get('removed')]
         if len(survivors) < 2:
             continue
 
@@ -801,12 +831,12 @@ def hard_dedup(file_infos, dup_dir, threshold, log_cb=None):
 
 
 # ============================================================
-# 核心逻辑：步骤2 —— 感知哈希查重（dHash，仅 jpg/jpeg）
+# 核心逻辑：步骤2 —— 感知哈希查重（dHash）
 # ============================================================
 
 def phash_dedup(file_infos, dup_dir, threshold, log_cb=None):
     """
-    感知哈希查重，仅针对 .jpg/.jpeg 且尚未在硬查重中被标记移除的文件：
+    感知哈希查重，针对可由 Pillow 直接处理且尚未在硬查重中被标记移除的图片：
         a) 无拍摄时间文件之间互相比较，相似的保留体积最大者；
         b) 有拍摄时间文件与（a 之后剩余的）无拍摄时间文件比较，相似时只保留有拍摄时间的；
         c) 有拍摄时间文件之间不比较。
@@ -819,7 +849,7 @@ def phash_dedup(file_infos, dup_dir, threshold, log_cb=None):
 
     candidates = [
         info for info in file_infos
-        if not info.get('removed') and info['ext'] in JPEG_EXTS
+        if not info.get('removed') and info['ext'] in VISUAL_DEDUP_EXTS
     ]
     with_time = [
         info for info in candidates
@@ -972,12 +1002,13 @@ def write_log_file(library_dir, stats, threshold):
     lines.append("=" * 50)
     lines.append("PhotoDedup 运行日志")
     lines.append(f"运行时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"要去重的文件目录：{os.path.abspath(library_dir)}")
     lines.append(f"感知哈希(dHash)相似度阈值：{threshold}")
     lines.append("=" * 50)
     lines.append("")
 
     lines.append(f"扫描的一级子目录总数：{len(stats['top_level_results'])}")
-    lines.append(f"图片文件总数（.jpg/.jpeg/.heic/.heif）：{stats['total_images']}")
+    lines.append(f"图片文件总数（支持的图片格式）：{stats['total_images']}")
     lines.append(f"重复文件总数：{stats['total_dup_count']}")
     lines.append("")
 
@@ -1005,6 +1036,16 @@ def write_log_file(library_dir, stats, threshold):
                 lines.append(f"       移动到：{relation['moved_to']}")
         else:
             lines.append("  重复文件对应关系列表：（无）")
+        image_issues = info.get('image_issues', [])
+        if image_issues:
+            lines.append(f"  图片读取问题数：{len(image_issues)}")
+            lines.append("  图片读取问题明细：")
+            for i, issue in enumerate(image_issues, 1):
+                lines.append(f"    {i}. 文件：{issue['path']}")
+                for detail in issue['details']:
+                    lines.append(f"       {detail}")
+        else:
+            lines.append("  图片读取问题数：0")
         lines.append("")
 
     if stats['errors']:
@@ -1110,6 +1151,18 @@ def run_dedup(library_dir, threshold, progress_cb=None, log_cb=None, stop_flag=N
             if log_cb:
                 log_cb(f"[失败] 感知哈希查重出错：{top_dir} : {e}")
 
+        image_issues = [
+            {'path': info['path'], 'details': info['image_issues']}
+            for info in file_infos
+            if info.get('image_issues')
+        ]
+        for issue in image_issues:
+            if log_cb:
+                log_cb(
+                    f"[图片读取问题] {issue['path']}\n"
+                    + "\n".join(f"      {detail}" for detail in issue['details'])
+                )
+
         stats['top_level_results'][top_name] = {
             'image_count': image_count,
             'global_md5_dup_count': global_count,
@@ -1121,6 +1174,7 @@ def run_dedup(library_dir, threshold, progress_cb=None, log_cb=None, stop_flag=N
             'phash_dup_count': phash_count,
             'phash_dup_names': phash_names,
             'phash_dup_relations': phash_relations,
+            'image_issues': image_issues,
         }
         stats['total_dup_count'] += global_count + hard_count + phash_count
 
@@ -1156,7 +1210,19 @@ class PhotoDedupApp:
 
         self._build_ui()
         self._load_last_settings()
+        self.root.after_idle(self._bring_window_to_front)
         self.root.after(100, self._poll_queue)
+
+    def _bring_window_to_front(self):
+        """程序启动时将主窗口显示到最前面，然后取消永久置顶。"""
+        self.root.deiconify()
+        self.root.lift()
+        try:
+            self.root.attributes('-topmost', True)
+            self.root.focus_force()
+            self.root.after(300, lambda: self.root.attributes('-topmost', False))
+        except tk.TclError:
+            pass
 
     # ---------------------------------------------------
     def _build_ui(self):

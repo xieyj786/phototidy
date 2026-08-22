@@ -1,13 +1,14 @@
-# PhotoTidy / VideoTidy Technical Documentation
+# PhotoTidy / VideoTidy / VideoCopy Technical Documentation
 
-English | [中文](#phototidy--videotidy-技术文档)
+English | [中文](#phototidy--videotidy--videocopy-技术文档)
 
-This project contains two local Tkinter-based desktop tools for organizing media files:
+This project contains three local Tkinter-based desktop tools for organizing and copying media files:
 
 - `phototidy.py`: organizes photos and other image files into a year/type/month based photo library. Video files are skipped.
 - `videotidy.py`: organizes video files only, grouped by year.
+- `videocopy.py`: copies video files while preserving their source subdirectory structure.
 
-Both tools provide a graphical interface, progress bar, runtime log, stop button, copy/move modes, and automatic filename de-duplication by appending suffixes such as `_1`, `_2`, and so on.
+All tools provide a graphical interface, progress bar, runtime log, stop button, and automatic filename de-duplication by appending suffixes such as `_1`, `_2`, and so on. PhotoTidy and VideoTidy support copy and move modes; VideoCopy is copy-only.
 
 ## Requirements
 
@@ -15,6 +16,7 @@ Both tools provide a graphical interface, progress bar, runtime log, stop button
 python3 -m pip install -r requirements.txt
 python3 phototidy.py
 python3 videotidy.py
+python3 videocopy.py
 ```
 
 Notes:
@@ -23,6 +25,7 @@ Notes:
 - `phototidy.py` requires Pillow to read image EXIF metadata.
 - HEIC/HEIF support depends on `pillow-heif`. Without it, the app can still start, but HEIC/HEIF EXIF reading may be limited.
 - `videotidy.py` only uses the Python standard library.
+- `videocopy.py` only uses the Python standard library.
 
 ## PhotoTidy
 
@@ -34,13 +37,10 @@ Notes:
 TargetRoot/
 ├── YYYY年照片集/
 │   ├── CameraModel拍摄照片/
-│   ├── 1-2月照片/
-│   ├── 3-4月照片/
-│   ├── 5-6月照片/
-│   ├── 7-8月照片/
-│   ├── 9-10月照片/
-│   ├── 11-12月照片/
-│   └── 其他图片文件/
+│   │   └── YYYY年MM月DD日/
+│   ├── YYYY年MM月照片/
+│   ├── YYYY年其他图片文件/
+│   └── YYYY年截图类文件/
 └── phototidy_log_YYYYMMDD_NNN.txt
 ```
 
@@ -53,46 +53,46 @@ Default types:
 - Captured photos: `.jpg`, `.jpeg`, `.heic`, `.heif`
 - Other images: `.png`, `.bmp`, `.gif`, `.tiff`, `.tif`, `.webp`
 
-The UI field for extra image extensions can add more file types, separated by commas, for example `.avif,.svg`.
+The UI field for extra screenshot-type extensions can add more file types, separated by commas, for example `.avif,.svg`.
 
 ### Date Detection
 
 Photo dates:
 
 1. For `.jpg/.jpeg/.heic/.heif`, PhotoTidy first reads EXIF `DateTimeOriginal`, `DateTimeDigitized`, and `DateTime`.
-2. If EXIF parsing succeeds, the file is placed under `YYYY年照片集/`, then into the corresponding two-month folder.
-3. Photos without usable EXIF capture time are placed under `其他图片文件/`, using file modification time for the year.
+2. If EXIF parsing succeeds, the file is placed under `YYYY年照片集/`.
+   - If the photo is identified as a standalone camera, it is split into `CameraModel拍摄照片/YYYY年MM月DD日/` based on the exact capture date.
+   - Other photos with usable EXIF capture time are archived into `YYYY年MM月照片/` (per-month folders).
+3. Photos without usable EXIF capture time are placed under `YYYY年其他图片文件/`, using file modification time for the year. PNG, BMP, GIF, and extra image extensions are placed under `YYYY年截图类文件/`.
 
 ### Standalone Camera Folder
 
-PhotoTidy reads EXIF `Make` and `Model`, identifies standalone cameras by keyword rules, and excludes phones and tablets. If a camera model reaches `CAMERA_PHOTO_MIN_COUNT = 10` photos in the same year, those photos are archived into:
+PhotoTidy reads EXIF `Make` and `Model`, identifies standalone cameras by keyword rules, and excludes phones and tablets. Each detected standalone-camera photo is archived into:
 
 ```text
-YYYY年照片集/CameraModel拍摄照片/
+YYYY年照片集/CameraModel拍摄照片/YYYY年MM月DD日/
 ```
 
 Example:
 
 ```text
-2024年照片集/DSC-RX100M3拍摄照片/
+2024年照片集/DSC-RX100M3拍摄照片/2024年08月15日/
 ```
-
-Standalone camera photos below the threshold are still grouped by month.
 
 ### Workflow
 
 1. Validate that the source directory exists and is readable, and that the target directory can be created and written.
 2. Reject targets nested inside the source directory.
 3. Recursively scan all files and collect extension statistics.
-4. Pre-scan photo EXIF data to count standalone camera photos by year and model.
-5. Classify each file:
-   - Standalone camera photos above the threshold go to `YYYY年照片集/<CameraModel>拍摄照片/`
-   - Ordinary photos with EXIF capture time go to the corresponding two-month folder
-   - Photos without capture time and other images go to `其他图片文件/`
+4. Classify each file:
+   - Standalone camera photos go to `YYYY年照片集/<CameraModel>拍摄照片/YYYY年MM月DD日/`
+   - Ordinary photos with EXIF capture time go to `YYYY年MM月照片/` (per-month folders)
+   - Photos without capture time go to `YYYY年其他图片文件/`
+   - PNG, BMP, GIF, and user-added image extensions go to `YYYY年截图类文件/`
    - Unsupported files are skipped
-6. Copy with `shutil.copy2` or move with `shutil.move`.
-7. In move mode, remove empty source subdirectories from bottom to top.
-8. Write a uniquely numbered log such as `phototidy_log_20260712_001.txt`. Runs on the same day increment the sequence without overwriting existing logs.
+5. Copy with `shutil.copy2` or move with `shutil.move`.
+6. In move mode, remove empty source subdirectories from bottom to top.
+7. Write a uniquely numbered log such as `phototidy_log_20260712_001.txt`. Runs on the same day increment the sequence without overwriting existing logs.
 
 ### Modes
 
@@ -128,7 +128,7 @@ TargetRoot/
 
 ### Supported File Types
 
-By default, VideoTidy recognizes `.mov`, `.mp4`, and `.avi`. Extra video extensions can be added in the UI, for example `.m4v,.mts`.
+By default, VideoTidy recognizes `.mov`, `.mp4`, `.avi`, and `.m2ts`. Extra video extensions can be added in the UI, for example `.m4v,.mts`.
 
 ### Workflow
 
@@ -145,6 +145,59 @@ By default, VideoTidy recognizes `.mov`, `.mp4`, and `.avi`. Extra video extensi
 
 Filesystem creation/birth time is deliberately not used because copying or moving a file may change it and cause the video to be archived under the wrong year.
 
+## VideoCopy
+
+`videocopy.py` recursively copies video files from a source directory into a target directory while preserving every source subdirectory level. It never moves or deletes source files.
+
+### Output Structure
+
+```text
+SourceRoot/
+└── Travel/
+    └── 2024/
+        └── clip.mp4
+
+TargetRoot/
+└── Travel/
+    └── 2024/
+        └── clip.mp4
+```
+
+Only directories containing supported video files are created in the target. Non-video files are skipped.
+
+### Supported File Types
+
+By default, VideoCopy recognizes `.mov`, `.avi`, `.mp4`, and `.m2ts`. The UI can add comma-separated extensions, such as `.m4v,.mts`.
+
+### Workflow
+
+1. Select different source and target directories.
+2. Recursively scan the source directory for supported video files.
+3. Copy each video with `shutil.copy2`, preserving its relative directory path and file metadata.
+4. If the destination filename already exists, append `_1`, `_2`, and so on without overwriting it.
+5. Write a uniquely numbered log in the target root, such as `videocopy_log_YYYYMMDD_NNN.txt`.
+
+VideoCopy saves the most recently selected source directory, target directory, and extra extensions in `~/.videocopy_config.json` and restores them at the next launch. The Stop button stops remaining copies; files copied before stopping remain in the target.
+
+### Log
+
+`videocopy_log_YYYYMMDD_NNN.txt` records the scan total, copied video total, counts by extension and top-level source directory, renamed copies, failures, and elapsed time.
+
+## VideoDedup
+
+`videodedup.py` performs exact duplicate detection across the entire video library. It compares files by size first and then by SHA-256 hash. When duplicates are detected, the redundant copies are moved into the duplicate root under a year-based subfolder instead of staying in a flat directory.
+
+Example output:
+
+```text
+重复视频文件/
+├── 2023年视频文件/
+├── 2024年视频文件/
+└── ...
+```
+
+The preserved file remains in its original location, while the duplicate is moved into the matching year folder and recorded in the log with the kept file and target path.
+
 ## Recent Responsibility and Date Changes
 
 - `phototidy.py` is now image-only. Video extensions, QuickTime parsing, video classification, and the `视频文件` output directory were removed. Video files are treated as unsupported and skipped; use `videotidy.py` for them.
@@ -157,6 +210,7 @@ The tools create date-stamped, three-digit sequential log files and never overwr
 - PhotoTidy: `phototidy_log_YYYYMMDD_NNN.txt`
 - PhotoDedup: `photodedup_log_YYYYMMDD_NNN.txt`
 - VideoTidy: `videotidy_log_YYYYMMDD_NNN.txt`
+- VideoCopy: `videocopy_log_YYYYMMDD_NNN.txt`
 
 ### Log
 
@@ -174,19 +228,20 @@ The tools create date-stamped, three-digit sequential log files and never overwr
 
 - The target directory cannot be inside the source directory.
 - Existing files are never overwritten; a unique target path is generated automatically.
-- Move mode requires confirmation.
+- Move mode in PhotoTidy and VideoTidy requires confirmation.
 - The UI stop button interrupts remaining work, but completed file operations are not rolled back.
 
 ---
 
-# PhotoTidy / VideoTidy 技术文档
+# PhotoTidy / VideoTidy / VideoCopy 技术文档
 
-本项目包含两个基于 Tkinter 的本地文件整理工具：
+本项目包含三个基于 Tkinter 的本地媒体整理与拷贝工具：
 
 - `phototidy.py`：只整理照片和其他图片，输出到按年份、类型、月份划分的照片库；视频文件会被跳过。
 - `videotidy.py`：只整理视频文件，输出到按年份划分的视频目录。
+- `videocopy.py`：仅拷贝视频文件，并完整保留源目录的子目录结构。
 
-两个工具都支持图形界面、进度条、运行日志、停止任务、拷贝/移动两种模式，并会在同名文件冲突时自动追加 `_1`、`_2` 等后缀避免覆盖。
+三个工具都支持图形界面、进度条、运行日志、停止任务，并会在同名文件冲突时自动追加 `_1`、`_2` 等后缀避免覆盖。PhotoTidy 和 VideoTidy 支持拷贝/移动两种模式，VideoCopy 仅支持拷贝。
 
 ## 运行环境
 
@@ -194,6 +249,7 @@ The tools create date-stamped, three-digit sequential log files and never overwr
 python3 -m pip install -r requirements.txt
 python3 phototidy.py
 python3 videotidy.py
+python3 videocopy.py
 ```
 
 说明：
@@ -202,6 +258,7 @@ python3 videotidy.py
 - `phototidy.py` 需要 Pillow 读取图片 EXIF。
 - HEIC/HEIF 支持依赖 `pillow-heif`；未安装时程序仍可启动，但 HEIC/HEIF 的 EXIF 读取能力会受限。
 - `videotidy.py` 仅使用标准库，不依赖 Pillow。
+- `videocopy.py` 仅使用标准库，不依赖 Pillow。
 
 ## PhotoTidy
 
@@ -213,13 +270,10 @@ python3 videotidy.py
 目标根目录/
 ├── YYYY年照片集/
 │   ├── 相机型号拍摄照片/
-│   ├── 1-2月照片/
-│   ├── 3-4月照片/
-│   ├── 5-6月照片/
-│   ├── 7-8月照片/
-│   ├── 9-10月照片/
-│   ├── 11-12月照片/
-│   └── 其他图片文件/
+│   │   └── YYYY年MM月DD日/
+│   ├── YYYY年MM月照片/
+│   ├── YYYY年其他图片文件/
+│   └── YYYY年截图类文件/
 └── phototidy_log_YYYYMMDD_NNN.txt
 ```
 
@@ -232,46 +286,46 @@ python3 videotidy.py
 - 拍摄照片：`.jpg`、`.jpeg`、`.heic`、`.heif`
 - 其他图片：`.png`、`.bmp`、`.gif`、`.tiff`、`.tif`、`.webp`
 
-界面中的“其他图片额外后缀”可继续补充扩展名，多个后缀用逗号分隔，例如 `.avif,.svg`。
+界面中的“截图类额外后缀”可继续补充扩展名，多个后缀用逗号分隔，例如 `.avif,.svg`。
 
 ### 时间读取规则
 
 照片时间：
 
 1. 对 `.jpg/.jpeg/.heic/.heif`，优先读取 EXIF 中的 `DateTimeOriginal`、`DateTimeDigitized`、`DateTime`。
-2. 解析成功后按 EXIF 年份进入 `YYYY年照片集/`，再按月份进入双月目录。
-3. 没有可用 EXIF 拍摄时间的照片进入 `其他图片文件/`，年份使用文件修改时间。
+2. 解析成功后按 EXIF 年份进入 `YYYY年照片集/`。
+   - 若该照片属于独立相机拍摄，则按拍摄日期细分到 `相机型号拍摄照片/YYYY年MM月DD日/`。
+   - 其他带有可用 EXIF 拍摄时间的照片按月份归入 `YYYY年MM月照片/`（按月分目录）。
+3. 没有可用 EXIF 拍摄时间的照片进入 `YYYY年其他图片文件/`，年份使用文件修改时间；PNG、BMP、GIF 和用户添加的图片后缀进入 `YYYY年截图类文件/`。
 
 ### 独立相机照片目录
 
-PhotoTidy 会读取 EXIF `Make` 和 `Model`，用关键词识别独立相机，并排除手机、平板等设备。某一年中同一相机型号照片数量达到 `CAMERA_PHOTO_MIN_COUNT = 10` 后，会归档到：
+PhotoTidy 会读取 EXIF `Make` 和 `Model`，用关键词识别独立相机，并排除手机、平板等设备。识别出的每张独立相机照片都会按拍摄日期归档到：
 
 ```text
-YYYY年照片集/相机型号拍摄照片/
+YYYY年照片集/相机型号拍摄照片/YYYY年MM月DD日/
 ```
 
 例如：
 
 ```text
-2024年照片集/DSC-RX100M3拍摄照片/
+2024年照片集/DSC-RX100M3拍摄照片/2024年08月15日/
 ```
-
-未达到数量阈值的独立相机照片仍按月份归档。
 
 ### 分类流程
 
 1. 校验源目录存在且可读，目标目录可创建且可写。
 2. 拒绝目标目录位于源目录内部，避免重复整理自身输出。
 3. 递归扫描源目录下全部文件，统计总数和后缀数量。
-4. 预扫描照片 EXIF，统计每年每个独立相机型号的照片数量。
-5. 逐个文件分类：
-   - 达到阈值的独立相机照片进入 `YYYY年照片集/<相机型号>拍摄照片/`
-   - 有 EXIF 拍摄时间的普通照片进入对应双月目录
-   - 无拍摄时间的照片和其他图片进入 `其他图片文件/`
+4. 逐个文件分类：
+   - 独立相机照片归入 `YYYY年照片集/<相机型号>拍摄照片/YYYY年MM月DD日/`（按拍摄日期细分）
+   - 有 EXIF 拍摄时间的普通照片归入 `YYYY年MM月照片/`（按月分目录）
+   - 无拍摄时间的照片进入 `YYYY年其他图片文件/`
+   - PNG、BMP、GIF 和用户添加的图片后缀进入 `YYYY年截图类文件/`
    - 非支持类型计为跳过
-6. 根据模式执行 `copy2` 或 `move`。
-7. 移动模式结束后，自底向上删除源目录中因移动产生的空子目录。
-8. 写入唯一编号的日志，例如 `phototidy_log_20260712_001.txt`。同一天多次运行时序号依次递增，不覆盖已有日志。
+5. 根据模式执行 `copy2` 或 `move`。
+6. 移动模式结束后，自底向上删除源目录中因移动产生的空子目录。
+7. 写入唯一编号的日志，例如 `phototidy_log_20260712_001.txt`。同一天多次运行时序号依次递增，不覆盖已有日志。
 
 ### 操作模式
 
@@ -301,13 +355,15 @@ YYYY年照片集/相机型号拍摄照片/
 目标根目录/
 ├── YYYY年视频文件/
 │   ├── video1.mp4
-│   └── video2.mov
+│   ├── video2.mov
+│   ├── video3.avi
+│   └── video4.m2ts
 └── videotidy_log_YYYYMMDD_NNN.txt
 ```
 
 ### 支持的文件类型
 
-默认识别 `.mov`、`.mp4`、`.avi`。界面中的“视频额外后缀”可以补充更多视频扩展名，例如 `.m4v,.mts`。
+默认识别 `.mov`、`.mp4`、`.avi`、`.m2ts`。界面中的“视频额外后缀”可以补充更多视频扩展名，例如 `.m4v,.mts`。
 
 ### 整理流程
 
@@ -324,6 +380,57 @@ YYYY年照片集/相机型号拍摄照片/
 
 程序明确不再使用文件系统创建/生成时间，因为复制或移动文件可能改变该时间，导致视频被归档到错误年份。
 
+## VideoCopy
+
+`videocopy.py` 会递归扫描源目录，将其中的视频文件拷贝到目标目录，同时完整保留源目录的各级子目录结构；不会移动或删除源文件。
+
+### 输出结构
+
+```text
+源目录/
+└── 旅行/
+    └── 2024/
+        └── clip.mp4
+
+目标目录/
+└── 旅行/
+    └── 2024/
+        └── clip.mp4
+```
+
+目标端仅按需创建包含支持视频文件的目录；非视频文件不会被拷贝。
+
+### 支持的文件类型
+
+默认识别 `.mov`、`.avi`、`.mp4`、`.m2ts`。界面可通过逗号分隔添加额外后缀，例如 `.m4v,.mts`。
+
+### 拷贝流程
+
+1. 选择不同的源目录和目标目录。
+2. 递归扫描源目录中所有支持的视频文件。
+3. 使用 `shutil.copy2` 拷贝视频，并保留相对目录路径及文件元数据。
+4. 目标目录存在同名文件时，自动追加 `_1`、`_2` 等序号，避免覆盖。
+5. 在目标根目录生成唯一编号日志，例如 `videocopy_log_YYYYMMDD_NNN.txt`。
+
+VideoCopy 会将最近选择的源目录、目标目录和额外后缀保存到 `~/.videocopy_config.json`，下次启动时自动恢复。点击“停止”会中断尚未开始的拷贝，已完成的拷贝会保留在目标目录。
+
+### 运行日志
+
+`videocopy_log_YYYYMMDD_NNN.txt` 会记录扫描总数、视频文件总数、各后缀及源目录一级子目录统计、重命名拷贝数量、失败明细和处理耗时。
+
+## VideoDedup
+
+`videodedup.py` 会对整个视频库做精确查重，先按文件大小筛选，再按 SHA-256 哈希判断是否完全相同。发现重复后，冗余副本不会再平铺放到根目录，而是会归入“重复视频文件/年份子目录”中，例如：
+
+```text
+重复视频文件/
+├── 2023年视频文件/
+├── 2024年视频文件/
+└── ...
+```
+
+保留的那份文件仍保留在原位置，重复文件会被移动到对应年份目录，并在日志中记录与保留文件的对应关系。
+
 ## 近期职责与时间规则调整
 
 - `phototidy.py` 现已专注处理图片。视频扩展名、QuickTime 解析、视频分类以及 `视频文件` 输出目录相关代码均已删除。视频文件会作为不支持类型跳过，请使用 `videotidy.py` 整理视频。
@@ -336,6 +443,7 @@ YYYY年照片集/相机型号拍摄照片/
 - PhotoTidy：`phototidy_log_YYYYMMDD_NNN.txt`
 - PhotoDedup：`photodedup_log_YYYYMMDD_NNN.txt`
 - VideoTidy：`videotidy_log_YYYYMMDD_NNN.txt`
+- VideoCopy：`videocopy_log_YYYYMMDD_NNN.txt`
 
 ### 运行日志
 
@@ -353,5 +461,5 @@ YYYY年照片集/相机型号拍摄照片/
 
 - 目标目录不能是源目录的子目录。
 - 同名文件不会覆盖，会自动生成唯一目标路径。
-- 移动模式会弹窗确认。
+- PhotoTidy 和 VideoTidy 的移动模式会弹窗确认。
 - 支持在界面中点击“停止”中断后续处理；已完成的文件操作不会回滚。

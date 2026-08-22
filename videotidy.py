@@ -8,14 +8,15 @@ VideoTidy —— 视频分类整理工具
 
     output/
     ├── YYYY年视频文件/
-    │   ├── video1.mp4
-    │   └── video2.mov
+    │   ├── mov
+    │   ├── mp4
+    │   ├── avi
+    │   └── m2ts
     └── videotidy_log_YYYYMMDD_NNN.txt
 
     操作模式：
       - 拷贝（安全）：从源目录复制视频文件到目标目录，源文件保留
-      - 移动（彻底整理）：从源目录移动视频文件到目标目录；若源目录下某子目录
-        因移动而变为空目录，则自动删除该空目录
+      - 移动（彻底整理）：从源目录移动视频文件到目标目录，保留移动后的空目录
 """
 
 import os
@@ -33,7 +34,7 @@ from tkinter import font as tkfont
 # 常量定义
 # ============================================================
 
-DEFAULT_VIDEO_EXTS = {'.mov', '.mp4', '.avi'}
+DEFAULT_VIDEO_EXTS = {'.mov', '.mp4', '.avi', '.m2ts'}
 SUPPORTED_MODES = {'copy', 'move'}
 LOG_PREFIX = 'videotidy_log'
 
@@ -249,22 +250,6 @@ def get_unique_target_path(target_dir, filename):
     return os.path.join(target_dir, f"{name}_T{timestamp}{ext}")
 
 
-def remove_empty_dirs(root_dir):
-    """移动模式下，自底向上清理源目录中变为空的子目录。"""
-    removed = []
-    root_abs = os.path.abspath(root_dir)
-    for dirpath, dirnames, filenames in os.walk(root_dir, topdown=False):
-        if os.path.abspath(dirpath) == root_abs:
-            continue
-        try:
-            if not os.listdir(dirpath):
-                os.rmdir(dirpath)
-                removed.append(dirpath)
-        except OSError:
-            pass
-    return removed
-
-
 def normalize_exts(text):
     """将逗号分隔的后缀字符串规范为小写 .ext 集合。"""
     result = set()
@@ -278,16 +263,32 @@ def normalize_exts(text):
     return result
 
 
+def get_video_type_folder(ext):
+    """根据视频扩展名返回归档子目录名。"""
+    ext = (ext or '').lower()
+    folder_map = {
+        '.mov': 'mov',
+        '.mp4': 'mp4',
+        '.avi': 'avi',
+        '.m2ts': 'm2ts',
+    }
+    return folder_map.get(ext, ext.lstrip('.')) or 'other'
+
+
 # ============================================================
 # 核心逻辑：日志写入
 # ============================================================
 
-def write_log_file(target_dir, stats):
+def write_log_file(target_dir, stats, source_dir=None):
     """写入带日期和递增序号的日志文件，确保已有日志不会被覆盖。"""
     lines = []
     lines.append("=" * 50)
     lines.append("VideoTidy 运行日志")
     lines.append(f"运行时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    if source_dir is not None:
+        lines.append(f"输入文件目录：{os.path.abspath(source_dir)}")
+    lines.append(f"输出文件目录：{os.path.abspath(target_dir)}")
+    lines.append(f"整理方式：{'拷贝' if stats.get('mode') == 'copy' else '移动'}")
     lines.append("=" * 50)
     lines.append("")
 
@@ -408,6 +409,7 @@ def organize_videos(source_dir, target_dir, mode, extra_exts,
         return make_error_stats(error_msg, video_exts)
 
     stats = {
+        'mode': mode,
         'total_files': 0,
         'video_exts': video_exts,
         'ext_counts': {},
@@ -418,6 +420,9 @@ def organize_videos(source_dir, target_dir, mode, extra_exts,
         'fail_details': [],
         'elapsed_time': 0,
     }
+
+    if log_cb:
+        log_cb(f"[整理方式] {'拷贝' if mode == 'copy' else '移动'}")
 
     all_files = []
     for dirpath, dirnames, filenames in os.walk(source_dir):
@@ -447,7 +452,8 @@ def organize_videos(source_dir, target_dir, mode, extra_exts,
         try:
             dt = get_video_datetime(filepath)
             year_folder = f"{dt.year}年视频文件"
-            target_subdir = os.path.join(target_dir, year_folder)
+            type_folder = get_video_type_folder(ext)
+            target_subdir = os.path.join(target_dir, year_folder, type_folder)
             os.makedirs(target_subdir, exist_ok=True)
             target_path = get_unique_target_path(target_subdir, os.path.basename(filepath))
 
@@ -472,14 +478,8 @@ def organize_videos(source_dir, target_dir, mode, extra_exts,
         if progress_cb:
             progress_cb(idx + 1, total, filepath)
 
-    if mode == 'move':
-        removed_dirs = remove_empty_dirs(source_dir)
-        if log_cb:
-            for d in removed_dirs:
-                log_cb(f"[清理] 删除空目录：{d}")
-
     stats['elapsed_time'] = time() - start_time
-    stats['log_path'] = write_log_file(target_dir, stats)
+    stats['log_path'] = write_log_file(target_dir, stats, source_dir)
     return stats
 
 
@@ -519,7 +519,19 @@ class VideoTidyApp:
         self.worker_thread = None
 
         self._build_ui()
+        self.root.after_idle(self._bring_window_to_front)
         self.root.after(100, self._poll_queue)
+
+    def _bring_window_to_front(self):
+        """程序启动时将主窗口显示到最前面，然后取消永久置顶。"""
+        self.root.deiconify()
+        self.root.lift()
+        try:
+            self.root.attributes('-topmost', True)
+            self.root.focus_force()
+            self.root.after(300, lambda: self.root.attributes('-topmost', False))
+        except tk.TclError:
+            pass
 
     def _build_ui(self):
         font_family = choose_font_family(self.root)
@@ -556,7 +568,7 @@ class VideoTidyApp:
         self.mode_var = tk.StringVar(value='copy')
         tk.Radiobutton(frame3, text="拷贝（安全，保留源文件）", variable=self.mode_var,
                        value='copy', font=FONT).pack(side='left', padx=4)
-        tk.Radiobutton(frame3, text="移动（彻底整理，清空空目录）", variable=self.mode_var,
+        tk.Radiobutton(frame3, text="移动（保留空目录）", variable=self.mode_var,
                        value='move', font=FONT, fg='#cc4444').pack(side='left', padx=12)
 
         frame4 = tk.Frame(self.root)
@@ -565,7 +577,7 @@ class VideoTidyApp:
         self.extra_ext_var = tk.StringVar()
         tk.Entry(frame4, textvariable=self.extra_ext_var, font=FONT).pack(
             side='left', fill='x', expand=True, padx=(0, 8))
-        tk.Label(frame4, text="默认 .mov,.mp4,.avi；可添加如 .m4v,.mts", font=FONT_SMALL, fg='#999999').pack(side='left')
+        tk.Label(frame4, text="默认 .mov,.mp4,.avi,.m2ts；可添加如 .m4v,.mts", font=FONT_SMALL, fg='#999999').pack(side='left')
 
         frame5 = tk.Frame(self.root)
         frame5.pack(fill='x', padx=16, pady=(12, 4))
@@ -634,7 +646,7 @@ class VideoTidyApp:
             if not messagebox.askyesno(
                 "确认",
                 "移动模式将把视频从源目录移动到目标目录，\n"
-                "并删除源目录下因移动而产生的空子目录。\n\n"
+                "移动后的空目录将保留。\n\n"
                 "此操作不可逆，是否继续？"
             ):
                 return
