@@ -19,6 +19,20 @@ spec.loader.exec_module(module)
 parse_datetime = module.parse_datetime
 read_exif = module.read_exif
 city_from_gps = module.city_from_gps
+has_camera_identity = module.has_camera_identity
+
+
+class CameraEligibilityTests(unittest.TestCase):
+    def test_requires_both_camera_make_and_model(self):
+        self.assertTrue(has_camera_identity('Canon', 'EOS 80D'))
+        self.assertFalse(has_camera_identity('', 'EOS 80D'))
+        self.assertFalse(has_camera_identity('Canon', ''))
+        self.assertFalse(has_camera_identity('', ''))
+
+    def test_capture_dates_alone_do_not_identify_a_camera(self):
+        # DateTimeOriginal/DateTimeDigitized are handled separately by
+        # read_exif; they must not make a file eligible for renaming.
+        self.assertFalse(has_camera_identity(None, None))
 
 
 class ParseDatetimeTests(unittest.TestCase):
@@ -72,6 +86,25 @@ class ReadExifTests(unittest.TestCase):
         with patch.object(module.Image, 'open', return_value=fake_image):
             self.assertEqual(read_exif('photo.jpg'), ('Test', 'Camera', None))
 
+    def test_uses_image_datetime_when_valid_gps_is_present(self):
+        fake_image = unittest.mock.MagicMock()
+        fake_exif = {
+            271: 'Apple', 272: 'iPhone',
+            306: '2019:02:11 19:14:07',
+            34853: {
+                1: 'N', 2: (27, 6, 59.51),
+                3: 'E', 4: (114, 58, 51.39),
+            },
+        }
+        fake_image.__enter__.return_value.getexif.return_value = fake_exif
+        with patch.object(module.Image, 'open', return_value=fake_image):
+            self.assertEqual(
+                read_exif('photo.jpg', include_gps=True),
+                ('Apple', 'iPhone', datetime(2019, 2, 11, 19, 14, 7),
+                 (27 + 6 / 60 + 59.51 / 3600,
+                  114 + 58 / 60 + 51.39 / 3600)),
+            )
+
     def test_ignores_non_mapping_gps_exif(self):
         fake_image = unittest.mock.MagicMock()
         fake_image.__enter__.return_value.getexif.return_value = {
@@ -115,6 +148,44 @@ class ReadExifTests(unittest.TestCase):
         self.assertAlmostEqual(result[3][0], 1.034166, places=5)
         self.assertAlmostEqual(result[3][1], 4.085, places=5)
 
+    def test_reads_gps_from_raw_mapping_when_sub_ifd_is_empty(self):
+        fake_image = unittest.mock.MagicMock()
+        fake_exif = unittest.mock.MagicMock()
+        fake_exif.get.side_effect = {
+            271: 'Test', 272: 'Camera', 36867: '2026:08:13 12:00:00',
+            34853: {
+                'GPSLatitudeRef': 'N', 'GPSLatitude': [(1, 1), (2, 1), (3, 1)],
+                'GPSLongitudeRef': 'E', 'GPSLongitude': [(4, 1), (5, 1), (6, 1)],
+            },
+        }.get
+        fake_exif.get_ifd.return_value = {}
+        fake_image.__enter__.return_value.getexif.return_value = fake_exif
+        with patch.object(module.Image, 'open', return_value=fake_image):
+            result = read_exif('photo.jpg', include_gps=True)
+        self.assertEqual(result[3], (1 + 2 / 60 + 3 / 3600, 4 + 5 / 60 + 6 / 3600))
+
+    def test_reads_pillow_style_rational_gps_values(self):
+        from PIL.TiffImagePlugin import IFDRational
+        exif = {
+            1: 'S', 2: [IFDRational(31, 1), IFDRational(13, 1), IFDRational(0, 1)],
+            3: 'W', 4: [IFDRational(121, 1), IFDRational(28, 1), IFDRational(0, 1)],
+        }
+        self.assertEqual(module.extract_gps(type('Exif', (), {
+            'get_ifd': lambda self, tag: exif,
+            'get': lambda self, tag: None,
+        })()), (-31 - 13 / 60, -121 - 28 / 60))
+
+    def test_reads_byte_gps_references(self):
+        exif = {
+            1: b'N', 2: [1, 2, 3], 3: b'E', 4: [4, 5, 6],
+        }
+        wrapper = type('Exif', (), {
+            'get_ifd': lambda self, tag: exif,
+            'get': lambda self, tag: None,
+        })()
+        self.assertEqual(module.extract_gps(wrapper), (1 + 2 / 60 + 3 / 3600,
+                                                        4 + 5 / 60 + 6 / 3600))
+
     def test_city_lookup_falls_back_to_country_name(self):
         response = MagicMock()
         response.__enter__.return_value = response
@@ -122,6 +193,35 @@ class ReadExifTests(unittest.TestCase):
         with patch.object(module.urllib.request, 'urlopen', return_value=response), \
              patch.object(module.json, 'load', return_value={'address': {'country': 'South Africa'}}):
             self.assertEqual(city_from_gps((1.0, 2.0)), '\u5357\u975e')
+
+    def test_city_lookup_uses_chinese_auckland_fallback(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b''
+        module._CITY_CACHE.clear()
+        with patch.object(module.urllib.request, 'urlopen', return_value=response), \
+             patch.object(module.json, 'load', return_value={'address': {'city': 'Auckland'}}):
+            self.assertEqual(city_from_gps((-36.85, 174.79)), '\u5965\u514b\u5170')
+
+    def test_city_lookup_broadens_an_untranslated_locality(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b''
+        module._CITY_CACHE.clear()
+        address = {'suburb': 'Devonport', 'city': 'Devonport',
+                   'state': 'Auckland', 'country': 'New Zealand'}
+        with patch.object(module.urllib.request, 'urlopen', return_value=response), \
+             patch.object(module.json, 'load', return_value={'address': address}):
+            self.assertEqual(city_from_gps((-36.83, 174.80)), '\u5965\u514b\u5170')
+
+    def test_city_lookup_uses_guangzhou_fallback(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b''
+        module._CITY_CACHE.clear()
+        with patch.object(module.urllib.request, 'urlopen', return_value=response), \
+             patch.object(module.json, 'load', return_value={'address': {'city': 'Guangzhou'}}):
+            self.assertEqual(city_from_gps((23.13, 113.26)), '广州')
 
 
 if __name__ == '__main__':

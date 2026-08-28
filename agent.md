@@ -21,6 +21,42 @@ cd /Volumes/T7XYJ/projects/phototidy
 
 执行其他脚本或测试时，同样以 `/Volumes/T7XYJ/pythonenvs/phototidy/bin/python` 替代 `python`。代码和文档修改完成后，应确认其已同步回 OneDrive 主项目目录；不要把环境文件、媒体文件或运行日志同步回去。
 
+### Windows 台式机
+
+Windows 台式机使用 OneDrive 中的共享源代码目录，不需要再创建第二个 `agent.md`：
+
+```text
+Windows 项目源代码：
+C:\Users\xieyj\OneDrive\projects\phototidy
+
+Windows Python 环境：
+C:\Users\xieyj\AppData\Local\Programs\Python\Python313\python.exe
+```
+
+在 PowerShell 中，从项目根目录运行：
+
+```powershell
+cd C:\Users\xieyj\OneDrive\projects\phototidy
+python phototidy.py
+python photorename.py
+```
+
+执行其他脚本时，同样使用 `python` 启动。非 GUI 回归检查使用：
+
+```powershell
+python -m unittest discover -v
+python _test_parse.py
+```
+
+如果本机尚未安装项目依赖，应在本机硬盘创建虚拟环境，不要将 `.venv/` 同步到 OneDrive：
+
+```powershell
+py -m venv D:\pythonenvs\phototidy
+D:\pythonenvs\phototidy\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
 ## 项目用途
 
 PhotoTidy 是一组本地运行的 Python/Tkinter 媒体整理工具。程序通过图形界面选择源目录与目标目录，对照片或视频进行整理、查重、拷贝或重命名。它们直接读写用户的媒体文件，因此任何修改都应优先在小型副本上验证，并默认选择“拷贝”而非“移动”。
@@ -42,11 +78,13 @@ PhotoTidy 是一组本地运行的 Python/Tkinter 媒体整理工具。程序通
 
 ## 运行环境
 
-- Python：建议 Python 3.10+；T7XYJ 已验证为 Python 3.12.10。
-- GUI：Tkinter（标准库）；T7XYJ 已验证 Tk 8.6。
+- Python：建议 Python 3.10+；当前 macOS 环境已验证为 Python 3.13.3。
+- GUI：Tkinter（标准库）。当前环境可用 Tk 9.0。
 - 第三方依赖：`Pillow>=9.0.0`、`pillow-heif>=0.7.0`，见 `requirements.txt`。
 - `Pillow` 负责图片/EXIF、dHash 和直方图处理；`pillow-heif` 用于注册 HEIC/HEIF 支持。未安装 HEIF 支持时 GUI 可能仍可启动，但 HEIC/HEIF 元数据读取能力会下降。
 - 视频工具只使用标准库；PhotoRename 的地理位置查询使用 Python 标准库的 HTTP 功能，网络不可用时应保留可恢复的离线行为，不能绕过 TLS 校验。
+
+不要把虚拟环境、打包产物或用户媒体写入版本控制或跨系统复制。OneDrive 同步目录只共享源代码与文档；详见 `ONEDRIVE_WORKFLOW.md`。
 
 ## 首次配置
 
@@ -92,7 +130,7 @@ python -m pip install -r requirements.txt
 .venv/bin/python _test_parse.py
 ```
 
-`test_photodedup.py` 依赖 Pillow；若未先安装 `requirements.txt`，测试会以 `ModuleNotFoundError: No module named 'PIL'` 失败。
+`test_photodedup.py` 依赖 Pillow；若未先安装 `requirements.txt`，测试会以 `ModuleNotFoundError: No module named 'PIL'` 失败。当前工作目录尚未安装该依赖，因此在安装前不要将该测试失败判断为功能回归。
 
 ## 文件操作与安全约束
 

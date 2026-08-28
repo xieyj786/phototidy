@@ -13,6 +13,7 @@ import urllib.request
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
+from typing import Literal, cast, overload
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -36,6 +37,11 @@ LOG_PREFIX = 'photorename_log'
 
 
 def clean(value):
+    if isinstance(value, bytes):
+        try:
+            value = value.decode('ascii')
+        except UnicodeDecodeError:
+            value = value.decode('utf-8', errors='replace')
     return str(value).replace('\x00', '').strip() if value is not None else ''
 
 
@@ -50,14 +56,27 @@ def parse_datetime(value):
         return None
 
 
-def read_exif(path, include_gps=False):
+@overload
+def read_exif(path: Path | str, include_gps: Literal[True]) -> tuple[str, str, datetime | None, tuple[float, float] | None]:
+    ...
+
+
+@overload
+def read_exif(path: Path | str, include_gps: bool = False) -> tuple[str, str, datetime | None]:
+    ...
+
+
+def read_exif(path: Path | str, include_gps: bool = False) -> tuple[str, str, datetime | None] | tuple[str, str, datetime | None, tuple[float, float] | None]:
     with Image.open(path) as image:
         exif = image.getexif()
         make, model = clean(exif.get(271)), clean(exif.get(272))
         taken = None
         # 36867 = DateTimeOriginal, 36868 = DateTimeDigitized.
-        # Do not use 306 (Image DateTime): it is the file's metadata
-        # modification time, not necessarily the moment the photo was taken.
+        # Do not normally use 306 (Image DateTime): it is often the file's
+        # metadata modification time, not necessarily the moment the photo
+        # was taken.  Some phone exports, however, preserve GPS and only
+        # retain 306.  In that case the GPS is strong evidence that this is
+        # a camera photo, so use 306 as a narrowly-scoped fallback below.
         exif_ifd = {}
         try:
             exif_ifd = exif.get_ifd(0x8769) or {}
@@ -67,7 +86,10 @@ def read_exif(path, include_gps=False):
             taken = parse_datetime(exif.get(tag)) or parse_datetime(exif_ifd.get(tag))
             if taken:
                 break
-        result = (make, model, taken, extract_gps(exif))
+        gps = extract_gps(exif)
+        if taken is None and gps:
+            taken = parse_datetime(exif.get(306))
+        result = (make, model, taken, gps)
         return result if include_gps else result[:3]
 
 
@@ -76,10 +98,25 @@ def is_phone(make, model):
     return any(marker.casefold() in text for marker in PHONE_MARKERS)
 
 
-def _gps_value(value):
+def has_camera_identity(make, model):
+    """Return whether EXIF identifies the camera that took the photo.
+
+    Both EXIF Make and Model must be present before a dated photo can be
+    classified as a phone photo or an independent camera photo.  A photo
+    without this identity may still be eligible for the PIC naming rule.
+    """
+    return bool(clean(make) and clean(model))
+
+
+def _gps_value(value: object) -> float | None:
     try:
-        return float(value[0]) / float(value[1]) if isinstance(value, tuple) else float(value)
-    except (TypeError, ValueError, ZeroDivisionError, IndexError):
+        # Pillow may expose a rational as IFDRational, a (numerator,
+        # denominator) pair, or an ordinary numeric value depending on the
+        # image/container and Pillow version.
+        if isinstance(value, (tuple, list)) and len(value) == 2:
+            return float(cast(float, value[0])) / float(cast(float, value[1]))
+        return float(cast(float, value))
+    except (TypeError, ValueError, ZeroDivisionError, IndexError, OverflowError):
         return None
 
 
@@ -93,16 +130,26 @@ def extract_gps(exif):
     # Pillow normally returns a mapping for GPSInfo, but malformed or
     # vendor-specific EXIF may contain a scalar (for example an integer).
     # Such metadata has no usable GPS coordinates and must not abort a batch.
+    # Some files expose an empty GPS sub-IFD through get_ifd() while retaining
+    # the raw GPSInfo mapping at tag 34853.  Do not discard that valid data.
+    if not gps:
+        gps = exif.get(34853) or {}
     if not isinstance(gps, Mapping):
         return None
-    lat_ref, lon_ref = clean(gps.get(1)).upper(), clean(gps.get(3)).upper()
-    lat_raw, lon_raw = gps.get(2), gps.get(4)
+
+    # Numeric keys are Pillow's normal representation; the names make this
+    # tolerant of EXIF readers/mocks that return decoded GPS tag names.
+    def gps_tag(number, name):
+        return gps.get(number, gps.get(name))
+
+    lat_ref, lon_ref = clean(gps_tag(1, 'GPSLatitudeRef')).upper(), clean(gps_tag(3, 'GPSLongitudeRef')).upper()
+    lat_raw, lon_raw = gps_tag(2, 'GPSLatitude'), gps_tag(4, 'GPSLongitude')
     if lat_ref not in {'N', 'S'} or lon_ref not in {'E', 'W'} or not lat_raw or not lon_raw:
         return None
     try:
         lat = sum(_gps_value(part) * (60 ** -index) for index, part in enumerate(lat_raw))
         lon = sum(_gps_value(part) * (60 ** -index) for index, part in enumerate(lon_raw))
-    except TypeError:
+    except (TypeError, ValueError, ZeroDivisionError, IndexError, OverflowError):
         return None
     if lat_ref == 'S': lat = -lat
     if lon_ref == 'W': lon = -lon
@@ -111,6 +158,10 @@ def extract_gps(exif):
 
 _CITY_CACHE = {}
 LOCATION_ZH = {
+    'guangzhou': '广州',
+    'guangzhou city': '广州市',
+    'shenzhen': '深圳',
+    'shenzhen city': '深圳市',
     'city of cape town': '\u5f00\u666e\u6566',
     'cape town': '\u5f00\u666e\u6566',
     'moses kotane local municipality': '\u83ab\u585e\u65af\u79d1\u5854\u5185',
@@ -119,6 +170,11 @@ LOCATION_ZH = {
     'emirate of dubai': '\u8fea\u62dc\u9177\u957f\u56fd',
     'united arab emirates': '\u963f\u62c9\u4f2f\u8054\u5408\u914b\u957f\u56fd',
     'south africa': '\u5357\u975e',
+    # Auckland is returned in English for many New Zealand GPS points because
+    # the corresponding OSM administrative object has no ``name:zh`` tag.
+    'auckland': '\u5965\u514b\u5170',
+    'auckland region': '\u5965\u514b\u5170\u5730\u533a',
+    'new zealand': '\u65b0\u897f\u5170',
     # Nominatim may return local Arabic names even when the request asks for
     # Chinese; normalize the landmarks seen in this photo library as well.
     '\u0627\u0644\u062f\u0651\u064e\u0627\u0646\u064e\u0629\u0652': '\u8fbe\u7eb3',
@@ -131,15 +187,21 @@ LOCATION_ZH = {
 
 
 def location_in_chinese(value):
-    """将反向地理编码返回的非中文地点规范为中文。"""
+    """Return a confirmed Chinese location name, or an empty string.
+
+    A default-language location must not leak into a filename.  Returning an
+    empty value lets the caller try the next, broader administrative level.
+    """
     value = clean(value)
+    if re.search(r'[\u3400-\u9fff]', value):
+        return value
     folded = value.casefold()
     if folded in LOCATION_ZH:
         return LOCATION_ZH[folded]
     for source, target in LOCATION_ZH.items():
         if source in folded:
             return target
-    return value
+    return ''
 
 
 def chinese_administrative_name(address, namedetails):
@@ -152,22 +214,35 @@ def chinese_administrative_name(address, namedetails):
     """
     address = address if isinstance(address, Mapping) else {}
     namedetails = namedetails if isinstance(namedetails, Mapping) else {}
-    chinese_name = (namedetails.get('name:zh-Hans') or namedetails.get('name:zh')
-                    or namedetails.get('name:zh-CN')
+    # OSM/Nominatim has used several spellings for the Chinese locale key.
+    # Check all of them, including case variants, before looking at the
+    # ordinary address fields (which are commonly in the local language).
+    localized = {clean(key).casefold(): value for key, value in namedetails.items()}
+    localized_address = {clean(key).casefold(): value for key, value in address.items()}
+    chinese_name = (localized.get('name:zh-hans') or localized.get('name:zh')
+                    or localized.get('name:zh-cn')
                     # Some Nominatim installations expose localised address
                     # values using these keys instead of namedetails.
-                    or address.get('name:zh-Hans') or address.get('name:zh')
-                    or address.get('name:zh-CN'))
+                    or localized_address.get('name:zh-hans') or localized_address.get('name:zh')
+                    or localized_address.get('name:zh-cn'))
     if chinese_name:
         return clean(chinese_name)
-    # At zoom 10 this is normally the municipality/district containing the
-    # GPS point.  Retain the granular fallbacks for rural locations.
-    value = (address.get('city') or address.get('town') or address.get('village')
-             or address.get('municipality') or address.get('locality')
-             or address.get('county') or address.get('state_district')
-             or address.get('state') or address.get('region')
-             or address.get('country') or address.get('country_code'))
-    return location_in_chinese(value)
+    # Prefer a locality when it has a confirmed Chinese name.  Otherwise
+    # progressively broaden the scope; for example, Devonport -> Auckland,
+    # rather than retaining the untranslated suburb in the filename.
+    levels = ('city', 'town', 'village', 'municipality', 'city_district',
+              'district', 'locality', 'suburb', 'neighbourhood', 'county',
+              'state_district', 'state', 'region', 'country', 'country_code')
+    for level in levels:
+        chinese_value = location_in_chinese(address.get(level))
+        if chinese_value:
+            return chinese_value
+    # A few Nominatim responses contain only a localized display name while
+    # omitting the corresponding administrative field.
+    display_name = location_in_chinese(address.get('display_name'))
+    if display_name:
+        return display_name
+    return ''
 
 
 def city_from_gps(gps):
@@ -189,6 +264,9 @@ def city_from_gps(gps):
             result = json.load(response)
             address = result.get('address', {})
             namedetails = result.get('namedetails', {})
+            if isinstance(address, Mapping) and result.get('display_name'):
+                address = dict(address)
+                address['display_name'] = result['display_name']
         city = chinese_administrative_name(address, namedetails)
     except (OSError, ValueError, json.JSONDecodeError):
         pass
@@ -218,19 +296,77 @@ def make_target(path, filename, ext, reserved):
     return target
 
 
+def files_from_latest_log(root):
+    """Return files listed for GPS retry in the newest log.
+
+    ``None`` means there is no previous PhotoRename log and the caller should
+    perform a full scan.  An empty list means a log exists but has no files
+    eligible for another GPS-based naming pass.
+    """
+    root_path = Path(root)
+    log_files = list(root_path.glob(f'{LOG_PREFIX}_*.txt'))
+    if not log_files:
+        return None
+    latest_log = max(log_files, key=lambda path: path.stat().st_mtime)
+    sections = {'无GPS 文件名对应：', 'GPS位置未知 文件名对应：'}
+    listed = []
+    seen = set()
+    active = False
+    try:
+        lines = latest_log.read_text(encoding='utf-8').splitlines()
+    except (OSError, UnicodeError):
+        return []
+    root_resolved = root_path.resolve()
+    for line in lines:
+        stripped = line.strip()
+        if stripped in sections:
+            active = True
+            continue
+        if active and stripped.endswith('文件名对应：'):
+            active = False
+        if not active or ' -> ' not in line:
+            continue
+        _, new_name = line.split(' -> ', 1)
+        candidate = Path(new_name.strip())
+        try:
+            candidate_resolved = candidate.resolve()
+            candidate_resolved.relative_to(root_resolved)
+        except (OSError, ValueError):
+            continue
+        if (candidate_resolved.is_file()
+                and candidate_resolved.suffix.casefold() in IMAGE_EXTS
+                and candidate_resolved not in seen):
+            seen.add(candidate_resolved)
+            listed.append(candidate_resolved)
+    return listed
+
+
 def write_log(root, stats):
     lines = [('=' * 60), 'PhotoRename 运行日志',
              f"运行时间：{datetime.now():%Y-%m-%d %H:%M:%S}", f'图片库目录：{root}', '=' * 60, '',
              f"扫描图片文件：{stats['scanned']}", f"符合 EXIF 条件：{stats['eligible']}",
              f"成功重新命名：{stats['renamed']}", f"跳过文件：{stats['skipped']}",
              f"处理失败：{len(stats['errors'])}", '']
-    lines.append('重新命名文件明细：')
-    lines.extend(f"  {old} -> {new}" for old, new in stats['renames'])
+    if stats.get('debug_log', False):
+        lines.append('重新命名文件明细：')
+        lines.extend(f"  {old} -> {new}" for old, new in stats['renames'])
     lines += ['', '各后缀文件统计：']
     for ext in ('.jpg', '.jpeg', '.heic', '.heif'):
         item = stats['extension_stats'][ext]
         lines.append(f"  {ext}: 总数 {item['total']}，成功重命名 {item['renamed']}，未重新命名 {item['not_renamed']}")
-    if not stats['renames']:
+    lines += ['', 'GPS 状态统计：',
+              f"  无GPS：{len(stats['no_gps_renames'])} 个",
+              f"  GPS位置未知：{len(stats['gps_unknown_renames'])} 个",
+              '']
+    lines.append('无GPS 文件名对应：')
+    lines.extend(f"  {old} -> {new}" for old, new in stats['no_gps_renames'])
+    if not stats['no_gps_renames']:
+        lines.append('  （无）')
+    lines.append('GPS位置未知 文件名对应：')
+    lines.extend(f"  {old} -> {new}" for old, new in stats['gps_unknown_renames'])
+    if not stats['gps_unknown_renames']:
+        lines.append('  （无）')
+    if stats.get('debug_log', False) and not stats['renames']:
         lines.append('  （无）')
     if stats['errors']:
         lines += ['', '错误明细：']
@@ -247,15 +383,26 @@ def write_log(root, stats):
             sequence += 1
 
 
-def rename_photos(root, progress_cb=None, log_cb=None, stop_flag=None):
+def rename_photos(root, progress_cb=None, log_cb=None, stop_flag=None, debug_log=False):
     started = time.perf_counter()
     stats = {'scanned': 0, 'eligible': 0, 'renamed': 0, 'skipped': 0,
-             'errors': [], 'renames': [], 'elapsed': 0}
-    files = [p for p in Path(root).rglob('*') if p.is_file() and p.suffix.casefold() in IMAGE_EXTS]
+             'errors': [], 'renames': [], 'no_gps_renames': [],
+             'gps_unknown_renames': [], 'elapsed': 0, 'debug_log': debug_log}
+    retry_files = files_from_latest_log(root)
+    if retry_files is None:
+        files = [p for p in Path(root).rglob('*') if p.is_file() and p.suffix.casefold() in IMAGE_EXTS]
+    else:
+        files = retry_files
+        stats['retry_mode'] = True
     stats['extension_stats'] = {
         ext: {'total': sum(p.suffix.casefold() == ext for p in files), 'renamed': 0, 'not_renamed': 0}
         for ext in ('.jpg', '.jpeg', '.heic', '.heif')
     }
+    if retry_files == []:
+        stats['elapsed'] = time.perf_counter() - started
+        stats['log_path'] = None
+        stats['no_work'] = True
+        return stats
     reserved = set()
     sequences = {}
     records = []
@@ -267,16 +414,12 @@ def rename_photos(root, progress_cb=None, log_cb=None, stop_flag=None):
             break
         try:
             make, model, taken, gps = read_exif(path, include_gps=True)
-            if path.suffix.casefold() in EXIF_REQUIRED_EXTS and not (make or model or taken or gps):
-                # JPEG/HEIC files without usable EXIF must remain unchanged.
+            # A usable EXIF capture time is required.  Do not fall back to
+            # the file modification time: that is not necessarily the time
+            # the photo was taken and would incorrectly rename files without
+            # EXIF capture metadata.
+            if taken is None:
                 continue
-            # GPS is sufficient to make the photo eligible.  Some phones and
-            # exported images retain GPS but lose Make/Model or EXIF time.
-            # Use the file modification date only when EXIF time is absent.
-            # Process every supported image in the selected library.  EXIF
-            # time is preferred; exported images without EXIF use mtime so
-            # files in one directory are not silently left unchanged.
-            taken = taken or datetime.fromtimestamp(path.stat().st_mtime)
             records.append((path, make, model, taken, gps,
                             city_from_gps(gps) if gps else None))
         except (OSError, ValueError, UnidentifiedImageError) as error:
@@ -303,14 +446,18 @@ def rename_photos(root, progress_cb=None, log_cb=None, stop_flag=None):
             else:
                 make, model, taken, gps, city = record
                 stats['eligible'] += 1
+                complete_camera_info = has_camera_identity(make, model)
                 phone = is_phone(make, model)
-                prefix = 'IMG' if phone else 'DSC'
+                prefix = ('IMG' if phone else 'DSC') if complete_camera_info else 'PIC'
                 ext = path.suffix.lower()
                 year_key = (prefix, taken.year)
                 sequences[year_key] = sequences.get(year_key, 0) + 1
                 if gps:
                     city = re.sub(r'[\\/:*?"<>|\x00-\x1f]', '', clean(city)) if city else ''
-                    city = city or gps_cities.get((path.parent, taken.date())) or '无GPS'
+                    # GPS was successfully extracted even when reverse
+                    # geocoding is unavailable.  Keep that distinction clear
+                    # in the filename instead of falsely claiming no GPS.
+                    city = city or gps_cities.get((path.parent, taken.date())) or 'GPS位置未知'
                     stem = f'{prefix}_{taken:%Y%m%d}_{city}_{sequences[year_key]:04d}'
                 else:
                     stem = f'{prefix}_{taken:%Y%m%d}_{taken:%H-%M-%S}_{sequences[year_key]:04d}'
@@ -318,10 +465,17 @@ def rename_photos(root, progress_cb=None, log_cb=None, stop_flag=None):
                 old, new = str(path), str(target)
                 path.rename(target)
                 stats['renamed'] += 1
+                # Log these categories according to the actual new filename,
+                # not according to whether EXIF contains GPS coordinates.
+                if '无GPS' in target.name:
+                    stats['no_gps_renames'].append((old, new))
+                if 'GPS位置未知' in target.name:
+                    stats['gps_unknown_renames'].append((old, new))
                 ext_stat = stats['extension_stats'].get(path.suffix.casefold())
                 if ext_stat:
                     ext_stat['renamed'] += 1
-                stats['renames'].append((old, new))
+                if debug_log:
+                    stats['renames'].append((old, new))
                 if log_cb: log_cb(f'[已改名] {old} -> {new}')
         except (OSError, ValueError, UnidentifiedImageError) as error:
             stats['errors'].append(f'{path}：{error}')
@@ -348,6 +502,7 @@ class PhotoRenameApp:
         root.after(250, lambda: root.attributes('-topmost', False))
         self.queue = queue.Queue()
         self.stop_flag = threading.Event()
+        self.debug_log = tk.BooleanVar(value=False)
         self.build_ui()
         root.after(100, self.poll_queue)
 
@@ -364,6 +519,7 @@ class PhotoRenameApp:
         buttons = tk.Frame(self.root); buttons.pack(fill='x', padx=16, pady=(0, 8))
         self.start = tk.Button(buttons, text='开始重新命名', font=(font[0], 13, 'bold'), bg='#4caf50', fg='white', height=2, command=self.start_work); self.start.pack(side='left', fill='x', expand=True, padx=(0, 6))
         self.stop = tk.Button(buttons, text='停止', font=(font[0], 13), height=2, width=8, state='disabled', command=self.stop_work); self.stop.pack(side='left')
+        tk.Checkbutton(self.root, text='调试日志：记录旧名称/新名称明细（默认关闭）', variable=self.debug_log).pack(anchor='w', padx=16, pady=(0, 8))
         box = tk.Frame(self.root); box.pack(fill='both', expand=True, padx=16, pady=(0, 16))
         self.log = tk.Text(box, font=('Consolas', 9), wrap='none'); self.log.pack(side='left', fill='both', expand=True)
         tk.Scrollbar(box, command=self.log.yview).pack(side='right', fill='y')
@@ -383,7 +539,7 @@ class PhotoRenameApp:
 
     def worker(self, root):
         try:
-            stats = rename_photos(root, lambda d, t, n: self.queue.put(('progress', d, t, n)), lambda s: self.queue.put(('log', s)), self.stop_flag)
+            stats = rename_photos(root, lambda d, t, n: self.queue.put(('progress', d, t, n)), lambda s: self.queue.put(('log', s)), self.stop_flag, self.debug_log.get())
             self.queue.put(('done', stats))
         except Exception as error: self.queue.put(('error', str(error)))
 
@@ -395,8 +551,13 @@ class PhotoRenameApp:
                     _, done, total, name = item; self.progress['maximum'] = total; self.progress['value'] = done; self.status.set(f'处理进度 ({done}/{total})：{name}')
                 elif item[0] == 'log': self.log.insert('end', item[1] + '\n'); self.log.see('end')
                 elif item[0] == 'done':
-                    stats = item[1]; self.start.config(state='normal'); self.stop.config(state='disabled'); self.status.set(f"完成 - 成功重新命名 {stats['renamed']} 个文件")
-                    messagebox.showinfo('处理完成', f"扫描文件：{stats['scanned']}\n成功重新命名：{stats['renamed']}\n跳过：{stats['skipped']}\n失败：{len(stats['errors'])}\n\n日志：{stats['log_path']}")
+                    stats = item[1]; self.start.config(state='normal'); self.stop.config(state='disabled')
+                    if stats.get('no_work'):
+                        self.status.set('完成 - 最新日志中没有待重新命名的 GPS 文件')
+                        messagebox.showinfo('无需处理', '最新日志中没有“无GPS”或“GPS位置未知”的文件列表，无需重新命名。')
+                    else:
+                        self.status.set(f"完成 - 成功重新命名 {stats['renamed']} 个文件")
+                        messagebox.showinfo('处理完成', f"扫描文件：{stats['scanned']}\n成功重新命名：{stats['renamed']}\n跳过：{stats['skipped']}\n失败：{len(stats['errors'])}\n\n日志：{stats['log_path']}")
                 elif item[0] == 'error': self.start.config(state='normal'); self.stop.config(state='disabled'); messagebox.showerror('错误', item[1])
         except queue.Empty: pass
         self.root.after(100, self.poll_queue)

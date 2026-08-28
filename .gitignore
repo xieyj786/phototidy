@@ -21,3 +21,6 @@ build_output.txt
 Thumbs.db
 .vscode/settings.json
 
+# Local logs and scratch files
+Codex.log
+To

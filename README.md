@@ -1,10 +1,11 @@
-# PhotoTidy / VideoTidy / VideoCopy Technical Documentation
+# PhotoTidy / PhotoRename / VideoTidy / VideoCopy Technical Documentation
 
-English | [中文](#phototidy--videotidy--videocopy-技术文档)
+English | [中文](#phototidy--photorename--videotidy--videocopy-技术文档) | [PhotoRename documentation](README_RENAME.md)
 
-This project contains three local Tkinter-based desktop tools for organizing and copying media files:
+This project contains four local Tkinter-based desktop tools for organizing, renaming, and copying media files:
 
 - `phototidy.py`: organizes photos and other image files into a year/type/month based photo library. Video files are skipped.
+- `photorename.py`: renames `.jpg`, `.jpeg`, `.heic`, and `.heif` files according to EXIF capture time, camera information, and GPS data. See [README_RENAME.md](README_RENAME.md).
 - `videotidy.py`: organizes video files only, grouped by year.
 - `videocopy.py`: copies video files while preserving their source subdirectory structure.
 
@@ -15,6 +16,7 @@ All tools provide a graphical interface, progress bar, runtime log, stop button,
 ```bash
 python3 -m pip install -r requirements.txt
 python3 phototidy.py
+python3 photorename.py
 python3 videotidy.py
 python3 videocopy.py
 ```
@@ -23,6 +25,7 @@ Notes:
 
 - Tkinter is part of the Python standard library on most Python installations.
 - `phototidy.py` requires Pillow to read image EXIF metadata.
+- `photorename.py` requires Pillow to read image EXIF metadata and uses `pillow-heif` for HEIC/HEIF support.
 - HEIC/HEIF support depends on `pillow-heif`. Without it, the app can still start, but HEIC/HEIF EXIF reading may be limited.
 - `videotidy.py` only uses the Python standard library.
 - `videocopy.py` only uses the Python standard library.
@@ -233,11 +236,12 @@ The tools create date-stamped, three-digit sequential log files and never overwr
 
 ---
 
-# PhotoTidy / VideoTidy / VideoCopy 技术文档
+# PhotoTidy / PhotoRename / VideoTidy / VideoCopy 技术文档
 
-本项目包含三个基于 Tkinter 的本地媒体整理与拷贝工具：
+本项目包含四个基于 Tkinter 的本地媒体整理、重命名与拷贝工具：
 
 - `phototidy.py`：只整理照片和其他图片，输出到按年份、类型、月份划分的照片库；视频文件会被跳过。
+- `photorename.py`：根据 EXIF 拍摄时间、相机信息和 GPS 信息，为 `.jpg`、`.jpeg`、`.heic`、`.heif` 照片重新命名，详见 [README_RENAME.md](README_RENAME.md)。
 - `videotidy.py`：只整理视频文件，输出到按年份划分的视频目录。
 - `videocopy.py`：仅拷贝视频文件，并完整保留源目录的子目录结构。
 
@@ -248,6 +252,7 @@ The tools create date-stamped, three-digit sequential log files and never overwr
 ```bash
 python3 -m pip install -r requirements.txt
 python3 phototidy.py
+python3 photorename.py
 python3 videotidy.py
 python3 videocopy.py
 ```
@@ -256,6 +261,7 @@ python3 videocopy.py
 
 - Tkinter 来自 Python 标准库，通常无需通过 `pip` 安装。
 - `phototidy.py` 需要 Pillow 读取图片 EXIF。
+- `photorename.py` 需要 Pillow 读取图片 EXIF，HEIC/HEIF 支持依赖 `pillow-heif`。
 - HEIC/HEIF 支持依赖 `pillow-heif`；未安装时程序仍可启动，但 HEIC/HEIF 的 EXIF 读取能力会受限。
 - `videotidy.py` 仅使用标准库，不依赖 Pillow。
 - `videocopy.py` 仅使用标准库，不依赖 Pillow。
