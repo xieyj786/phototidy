@@ -1,15 +1,18 @@
-# PhotoTidy / PhotoRename / VideoTidy / VideoCopy Technical Documentation
+# PhotoTidy media-library tools
 
-English | [中文](#phototidy--photorename--videotidy--videocopy-技术文档) | [PhotoRename documentation](README_RENAME.md)
+English | [中文](#phototidy-媒体库工具) | [PhotoRename documentation](README_RENAME.md)
 
-This project contains four local Tkinter-based desktop tools for organizing, renaming, and copying media files:
+This project contains local desktop tools for organizing, renaming, copying, and de-duplicating a media library:
 
 - `phototidy.py`: organizes photos and other image files into a year/type/month based photo library. Video files are skipped.
 - `photorename.py`: renames `.jpg`, `.jpeg`, `.heic`, and `.heif` files according to EXIF capture time, camera information, and GPS data. See [README_RENAME.md](README_RENAME.md).
 - `videotidy.py`: organizes video files only, grouped by year.
 - `videocopy.py`: copies video files while preserving their source subdirectory structure.
+- `photodedup.py`: finds duplicate images using exact and visual comparisons. See [README_DEDUP.md](README_DEDUP.md).
+- `videodedup.py`: finds exact duplicate videos by size and SHA-256. See [README_DEDUP.md](README_DEDUP.md).
+- `scannogps.py`: scans already-renamed photos for `无GPS` and `GPS位置未知`, then writes a PhotoRename-compatible retry log.
 
-All tools provide a graphical interface, progress bar, runtime log, stop button, and automatic filename de-duplication by appending suffixes such as `_1`, `_2`, and so on. PhotoTidy and VideoTidy support copy and move modes; VideoCopy is copy-only.
+The four organizer and copy tools provide a graphical interface, progress bar, runtime log, stop button, and automatic filename de-duplication by appending suffixes such as `_1`, `_2`, and so on. PhotoTidy and VideoTidy support copy and move modes; VideoCopy is copy-only.
 
 ## Requirements
 
@@ -19,6 +22,9 @@ python3 phototidy.py
 python3 photorename.py
 python3 videotidy.py
 python3 videocopy.py
+python3 photodedup.py
+python3 videodedup.py
+python3 scannogps.py /path/to/photo-library
 ```
 
 Notes:
@@ -29,6 +35,22 @@ Notes:
 - HEIC/HEIF support depends on `pillow-heif`. Without it, the app can still start, but HEIC/HEIF EXIF reading may be limited.
 - `videotidy.py` only uses the Python standard library.
 - `videocopy.py` only uses the Python standard library.
+- `videodedup.py` and `scannogps.py` only use the Python standard library.
+
+## GPS retry scan
+
+Run `scannogps.py` against the root of an already-renamed photo library to find
+photos whose location field is still `无GPS` or `GPS位置未知`:
+
+```bash
+python3 scannogps.py /path/to/photo-library
+```
+
+It scans JPG/JPEG/HEIC/HEIF files recursively, reports counts for the IMG,
+DSC, and PIC naming formats, and creates the next available
+`photorename_log_YYYYMMDD_NNN.txt` in the selected library root. The log keeps
+the `source -> target` lines that PhotoRename accepts for a later GPS retry. If
+no path is supplied, the tool opens a folder picker when Tkinter is available.
 
 ## PhotoTidy
 
@@ -236,16 +258,19 @@ The tools create date-stamped, three-digit sequential log files and never overwr
 
 ---
 
-# PhotoTidy / PhotoRename / VideoTidy / VideoCopy 技术文档
+# PhotoTidy 媒体库工具
 
-本项目包含四个基于 Tkinter 的本地媒体整理、重命名与拷贝工具：
+本项目包含一组本地媒体整理、重命名、拷贝与查重工具：
 
 - `phototidy.py`：只整理照片和其他图片，输出到按年份、类型、月份划分的照片库；视频文件会被跳过。
 - `photorename.py`：根据 EXIF 拍摄时间、相机信息和 GPS 信息，为 `.jpg`、`.jpeg`、`.heic`、`.heif` 照片重新命名，详见 [README_RENAME.md](README_RENAME.md)。
 - `videotidy.py`：只整理视频文件，输出到按年份划分的视频目录。
 - `videocopy.py`：仅拷贝视频文件，并完整保留源目录的子目录结构。
+- `photodedup.py`：通过完全相同与视觉相似两种方式查找重复图片，详见 [README_DEDUP.md](README_DEDUP.md)。
+- `videodedup.py`：按文件大小与 SHA-256 查找完全重复的视频，详见 [README_DEDUP.md](README_DEDUP.md)。
+- `scannogps.py`：扫描已重命名照片中的“无GPS”和“GPS位置未知”，并生成可供 PhotoRename 重试的日志。
 
-三个工具都支持图形界面、进度条、运行日志、停止任务，并会在同名文件冲突时自动追加 `_1`、`_2` 等后缀避免覆盖。PhotoTidy 和 VideoTidy 支持拷贝/移动两种模式，VideoCopy 仅支持拷贝。
+四个整理与拷贝工具均支持图形界面、进度条、运行日志、停止任务，并会在同名文件冲突时自动追加 `_1`、`_2` 等后缀避免覆盖。PhotoTidy 和 VideoTidy 支持拷贝/移动两种模式，VideoCopy 仅支持拷贝。
 
 ## 运行环境
 
@@ -255,6 +280,9 @@ python3 phototidy.py
 python3 photorename.py
 python3 videotidy.py
 python3 videocopy.py
+python3 photodedup.py
+python3 videodedup.py
+python3 scannogps.py /path/to/photo-library
 ```
 
 说明：
@@ -265,6 +293,20 @@ python3 videocopy.py
 - HEIC/HEIF 支持依赖 `pillow-heif`；未安装时程序仍可启动，但 HEIC/HEIF 的 EXIF 读取能力会受限。
 - `videotidy.py` 仅使用标准库，不依赖 Pillow。
 - `videocopy.py` 仅使用标准库，不依赖 Pillow。
+- `videodedup.py` 与 `scannogps.py` 仅使用标准库。
+
+## GPS 重试扫描
+
+对已重命名照片库的根目录运行 `scannogps.py`，即可找出位置字段仍为“无GPS”或“GPS位置未知”的照片：
+
+```bash
+python3 scannogps.py /path/to/photo-library
+```
+
+工具会递归扫描 JPG/JPEG/HEIC/HEIF 文件，统计 IMG、DSC、PIC 三类命名格式，
+并在所选照片库根目录创建下一个可用的 `photorename_log_YYYYMMDD_NNN.txt`。
+日志保留 PhotoRename 可识别的 `源路径 -> 目标路径` 行，供后续 GPS 重试使用。
+未提供目录时，若 Tkinter 可用，程序会打开目录选择窗口。
 
 ## PhotoTidy
 
